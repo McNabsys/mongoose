@@ -1,5 +1,6 @@
 support/
 cache/
+checkpoints/
 __pycache__/
 *.pyc
 *.egg-info/
