@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
 
 from mongoose.data.ground_truth import MoleculeGT, build_molecule_gt
-from mongoose.inference.evaluate import EvalMetrics, evaluate_intervals
+from mongoose.inference.evaluate import (
+    EvalMetrics,
+    PeakCountStats,
+    evaluate_intervals,
+    evaluate_peak_counts,
+)
 from mongoose.inference.legacy_t2d import legacy_t2d_intervals
 from mongoose.inference.pipeline import InferredMolecule, run_inference
 from mongoose.io.assigns import load_assigns
@@ -97,6 +104,18 @@ def main() -> None:
         default="cpu",
         help="Device for inference (cpu or cuda)",
     )
+    parser.add_argument(
+        "--output-json",
+        type=str,
+        default=None,
+        help="Optional path to write structured JSON evaluation results",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional run identifier to embed in JSON metadata",
+    )
     args = parser.parse_args()
 
     # --- Load data ---
@@ -133,6 +152,8 @@ def main() -> None:
     unet_pred_intervals: list[np.ndarray] = []
     gt_intervals: list[np.ndarray] = []
     legacy_pred_intervals: list[np.ndarray] = []
+    model_peak_counts: list[int] = []
+    reference_matched_counts: list[int] = []
 
     evaluated = 0
     skipped = 0
@@ -191,6 +212,13 @@ def main() -> None:
             skipped += 1
             continue
 
+        # Record peak-count discrepancy vs wfmproc-matched probe count.
+        # Matched count = number of wfmproc probes that aligned to the reference.
+        # Recorded only after we commit to keeping this molecule so the list
+        # length matches the number of evaluated molecules.
+        model_peak_counts.append(len(result.probes))
+        reference_matched_counts.append(len(gt.reference_probe_bp))
+
         # --- Legacy T2D baseline ---
         if transforms is not None:
             ch_key = f"Ch{mol.channel:03d}"
@@ -221,6 +249,7 @@ def main() -> None:
     unet_metrics = evaluate_intervals(unet_pred_intervals, gt_intervals)
     print(_format_metrics("U-Net", unet_metrics))
 
+    legacy_metrics: EvalMetrics | None = None
     if transforms is not None and len(legacy_pred_intervals) > 0:
         # Filter out molecules with NaN legacy predictions
         valid_legacy = []
@@ -245,7 +274,64 @@ def main() -> None:
         else:
             print("  Legacy T2D: no valid predictions")
 
+    # Peak-count discrepancy vs wfmproc-matched probe counts
+    peak_stats: PeakCountStats | None = None
+    if len(model_peak_counts) > 0:
+        peak_stats = evaluate_peak_counts(model_peak_counts, reference_matched_counts)
+        print(
+            f"\n  Peak-count discrepancy (model - wfmproc): "
+            f"mean={peak_stats.mean_discrepancy:+.2f}  "
+            f"median={peak_stats.median_discrepancy:+.2f}  "
+            f"std={peak_stats.std_discrepancy:.2f}  "
+            f"more={peak_stats.fraction_more_detections*100:.0f}%  "
+            f"fewer={peak_stats.fraction_fewer_detections*100:.0f}%  "
+            f"equal={peak_stats.fraction_equal_detections*100:.0f}%"
+        )
+
     print("=" * 80)
+
+    # --- Optional JSON output ---
+    if args.output_json is not None:
+        output_path = Path(args.output_json)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        result_dict: dict = {
+            "metadata": {
+                "checkpoint": str(args.checkpoint),
+                "run_id": args.run_id,
+                "num_molecules_evaluated": unet_metrics.num_molecules,
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            },
+            "dl_model": {
+                "mae_bp": unet_metrics.mae_bp,
+                "median_ae_bp": unet_metrics.median_ae_bp,
+                "std_ae_bp": unet_metrics.std_ae_bp,
+                "num_intervals": unet_metrics.num_intervals,
+            },
+        }
+
+        if legacy_metrics is not None:
+            result_dict["legacy_t2d"] = {
+                "mae_bp": legacy_metrics.mae_bp,
+                "median_ae_bp": legacy_metrics.median_ae_bp,
+                "std_ae_bp": legacy_metrics.std_ae_bp,
+                "num_intervals": legacy_metrics.num_intervals,
+            }
+
+        if peak_stats is not None:
+            result_dict["peak_count"] = {
+                "mean_discrepancy": peak_stats.mean_discrepancy,
+                "median_discrepancy": peak_stats.median_discrepancy,
+                "std_discrepancy": peak_stats.std_discrepancy,
+                "fraction_more_detections": peak_stats.fraction_more_detections,
+                "fraction_fewer_detections": peak_stats.fraction_fewer_detections,
+                "fraction_equal_detections": peak_stats.fraction_equal_detections,
+                "num_molecules": peak_stats.num_molecules,
+            }
+
+        with output_path.open("w", encoding="utf-8") as fh:
+            json.dump(result_dict, fh, indent=2)
+        logger.info("Wrote JSON results to %s", output_path)
 
 
 if __name__ == "__main__":

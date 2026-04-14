@@ -3,7 +3,12 @@
 import numpy as np
 import pytest
 
-from mongoose.inference.evaluate import EvalMetrics, evaluate_intervals
+from mongoose.inference.evaluate import (
+    EvalMetrics,
+    PeakCountStats,
+    evaluate_intervals,
+    evaluate_peak_counts,
+)
 
 
 def test_evaluate_perfect_prediction():
@@ -61,3 +66,61 @@ def test_evaluate_mismatched_molecule_count_raises():
     pred = [np.array([1000.0]), np.array([2000.0])]
     with pytest.raises(ValueError):
         evaluate_intervals(pred, gt)
+
+
+# --- Peak-count discrepancy tests ---
+
+
+def test_peak_count_equal():
+    stats = evaluate_peak_counts([3, 4, 5], [3, 4, 5])
+    assert stats.mean_discrepancy == 0.0
+    assert stats.median_discrepancy == 0.0
+    assert stats.std_discrepancy == 0.0
+    assert stats.fraction_equal_detections == 1.0
+    assert stats.fraction_more_detections == 0.0
+    assert stats.fraction_fewer_detections == 0.0
+    assert stats.num_molecules == 3
+
+
+def test_peak_count_model_finds_more():
+    # Discrepancies: +2, +2, +2 -> mean = 2.0
+    stats = evaluate_peak_counts([5, 6, 5], [3, 4, 3])
+    assert stats.mean_discrepancy == 2.0
+    assert stats.fraction_more_detections == 1.0
+    assert stats.fraction_equal_detections == 0.0
+    assert stats.fraction_fewer_detections == 0.0
+
+
+def test_peak_count_model_finds_fewer():
+    stats = evaluate_peak_counts([2, 3], [4, 5])
+    assert stats.mean_discrepancy == -2.0
+    assert stats.fraction_fewer_detections == 1.0
+    assert stats.fraction_more_detections == 0.0
+    assert stats.fraction_equal_detections == 0.0
+
+
+def test_peak_count_mixed():
+    stats = evaluate_peak_counts([3, 5, 2], [3, 4, 3])
+    # Discrepancies: 0, +1, -1
+    assert abs(stats.mean_discrepancy - 0.0) < 1e-6
+    assert abs(stats.fraction_more_detections - 1 / 3) < 1e-6
+    assert abs(stats.fraction_fewer_detections - 1 / 3) < 1e-6
+    assert abs(stats.fraction_equal_detections - 1 / 3) < 1e-6
+    assert stats.num_molecules == 3
+
+
+def test_peak_count_median_and_std():
+    # Discrepancies: -2, 0, +2, +4 -> median=1.0
+    stats = evaluate_peak_counts([3, 5, 7, 9], [5, 5, 5, 5])
+    assert abs(stats.median_discrepancy - 1.0) < 1e-6
+    assert stats.std_discrepancy > 0.0
+
+
+def test_peak_count_mismatched_lengths_raises():
+    with pytest.raises(ValueError):
+        evaluate_peak_counts([1, 2, 3], [1, 2])
+
+
+def test_peak_count_empty_raises():
+    with pytest.raises(ValueError):
+        evaluate_peak_counts([], [])
