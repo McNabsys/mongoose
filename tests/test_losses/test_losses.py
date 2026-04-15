@@ -1,3 +1,4 @@
+import pytest
 import torch
 from mongoose.losses.focal import focal_loss
 from mongoose.losses.spatial import sparse_huber_delta_loss
@@ -75,23 +76,207 @@ def test_sparse_velocity_loss_with_error():
     assert loss.item() > 0
 
 
-def test_combined_loss_warmup():
-    combined = CombinedLoss(lambda_bp=1.0, lambda_vel=1.0, warmup_epochs=5)
+def test_combined_loss_warmstart_blend():
+    combined = CombinedLoss(warmstart_epochs=5, warmstart_fade_epochs=2)
     combined.set_epoch(0)
-    assert combined.current_lambda_bp == 0.0
-    assert combined.current_lambda_vel == 0.0
-    combined.set_epoch(5)
-    assert abs(combined.current_lambda_bp - 1.0) < 1e-6
-    assert abs(combined.current_lambda_vel - 1.0) < 1e-6
+    assert combined._warmstart_blend == 1.0
     combined.set_epoch(2)
-    assert abs(combined.current_lambda_bp - 0.4) < 1e-6
+    assert combined._warmstart_blend == 1.0  # still full-warmstart phase
+    combined.set_epoch(3)
+    assert 0.0 < combined._warmstart_blend < 1.0  # fading
+    combined.set_epoch(5)
+    assert combined._warmstart_blend == 0.0
+    combined.set_epoch(10)
+    assert combined._warmstart_blend == 0.0
 
 
-def test_combined_loss_warmup_zero_epochs():
-    combined = CombinedLoss(lambda_bp=2.0, lambda_vel=3.0, warmup_epochs=0)
+def test_combined_loss_lambda_schedule():
+    combined = CombinedLoss(
+        lambda_bp=1.0, lambda_vel=1.0, lambda_count=1.0, warmstart_epochs=5
+    )
     combined.set_epoch(0)
-    assert abs(combined.current_lambda_bp - 2.0) < 1e-6
-    assert abs(combined.current_lambda_vel - 3.0) < 1e-6
+    assert combined.current_lambda_bp == 0.5
+    assert combined.current_lambda_vel == 0.5
+    assert combined.current_lambda_count == 0.5
+    combined.set_epoch(5)
+    assert combined.current_lambda_bp == 1.0
+    assert combined.current_lambda_vel == 1.0
+    assert combined.current_lambda_count == 1.0
+    combined.set_epoch(10)
+    assert combined.current_lambda_bp == 1.0
+
+
+def test_combined_loss_warmstart_zero_epochs():
+    """With warmstart_epochs=0 the blend is always 0 and lambdas are at target."""
+    combined = CombinedLoss(
+        lambda_bp=2.0, lambda_vel=3.0, lambda_count=4.0, warmstart_epochs=0
+    )
+    combined.set_epoch(0)
+    assert combined._warmstart_blend == 0.0
+    assert combined.current_lambda_bp == 2.0
+    assert combined.current_lambda_vel == 3.0
+    assert combined.current_lambda_count == 4.0
+
+
+def _make_peaky_heatmap(length: int, centers: list[int], sigma: float = 2.0) -> torch.Tensor:
+    t = torch.arange(length, dtype=torch.float32)
+    hm = torch.zeros(length, dtype=torch.float32)
+    for c in centers:
+        hm = hm + torch.exp(-0.5 * ((t - c) / sigma) ** 2)
+    return hm.clamp(max=1.0)
+
+
+@pytest.fixture
+def minimal_batch():
+    """Small synthetic batch for exercising CombinedLoss end-to-end."""
+    length = 256
+    # Molecule 0: three peaks at 40, 120, 200
+    # Molecule 1: three peaks at 50, 130, 210
+    centers_0 = [40, 120, 200]
+    centers_1 = [50, 130, 210]
+    pred_heatmap = torch.stack(
+        [
+            _make_peaky_heatmap(length, centers_0),
+            _make_peaky_heatmap(length, centers_1),
+        ]
+    ).requires_grad_(True)
+
+    # Monotonic cumulative bp with varied slope
+    cum_bp = torch.stack(
+        [
+            torch.linspace(0.0, 10000.0, length),
+            torch.linspace(0.0, 9000.0, length),
+        ]
+    ).clone().requires_grad_(True)
+
+    raw_velocity = torch.full((2, length), 5.0).clone().requires_grad_(True)
+
+    # Reference bp positions -- ordered (differences match rough spacing).
+    ref_bp = [
+        torch.tensor([0, 3000, 7500], dtype=torch.int64),
+        torch.tensor([0, 3300, 7000], dtype=torch.int64),
+    ]
+    n_ref = torch.tensor([3, 3], dtype=torch.int64)
+    mask = torch.ones(2, length, dtype=torch.bool)
+
+    return {
+        "pred_heatmap": pred_heatmap,
+        "pred_cumulative_bp": cum_bp,
+        "raw_velocity": raw_velocity,
+        "ref_bp": ref_bp,
+        "n_ref": n_ref,
+        "mask": mask,
+    }
+
+
+@pytest.fixture
+def minimal_batch_with_warmstart(minimal_batch):
+    length = minimal_batch["pred_heatmap"].shape[1]
+    warmstart_heatmap = torch.stack(
+        [
+            _make_peaky_heatmap(length, [40, 120, 200], sigma=3.0),
+            _make_peaky_heatmap(length, [50, 130, 210], sigma=3.0),
+        ]
+    )
+    warmstart_valid = torch.tensor([True, True], dtype=torch.bool)
+    return {**minimal_batch, "warmstart_heatmap": warmstart_heatmap, "warmstart_valid": warmstart_valid}
+
+
+def test_combined_loss_forward_runs_post_warmstart(minimal_batch):
+    """A forward pass with no warmstart labels should run end-to-end."""
+    combined = CombinedLoss(warmstart_epochs=0)
+    combined.set_epoch(1)
+    loss, details = combined(
+        pred_heatmap=minimal_batch["pred_heatmap"],
+        pred_cumulative_bp=minimal_batch["pred_cumulative_bp"],
+        raw_velocity=minimal_batch["raw_velocity"],
+        reference_bp_positions_list=minimal_batch["ref_bp"],
+        n_ref_probes=minimal_batch["n_ref"],
+        warmstart_heatmap=None,
+        warmstart_valid=None,
+        mask=minimal_batch["mask"],
+    )
+    assert torch.isfinite(loss)
+    assert loss.requires_grad
+    assert "probe" in details
+    assert "bp" in details
+    assert "vel" in details
+    assert "count" in details
+    assert details["warmstart_blend"] == 0.0
+
+
+def test_combined_loss_forward_runs_with_warmstart(minimal_batch_with_warmstart):
+    """With warmstart labels at epoch 0, the focal component must be active."""
+    combined = CombinedLoss(warmstart_epochs=5, warmstart_fade_epochs=2)
+    combined.set_epoch(0)
+    batch = minimal_batch_with_warmstart
+    loss, details = combined(
+        pred_heatmap=batch["pred_heatmap"],
+        pred_cumulative_bp=batch["pred_cumulative_bp"],
+        raw_velocity=batch["raw_velocity"],
+        reference_bp_positions_list=batch["ref_bp"],
+        n_ref_probes=batch["n_ref"],
+        warmstart_heatmap=batch["warmstart_heatmap"],
+        warmstart_valid=batch["warmstart_valid"],
+        mask=batch["mask"],
+    )
+    assert torch.isfinite(loss)
+    assert details["warmstart_blend"] == 1.0
+    # Focal component contributes to probe loss at blend=1.0.
+    assert details["probe"] > 0.0
+
+
+def test_combined_loss_backward_flows_gradient(minimal_batch):
+    """Loss.backward() should populate gradients on the differentiable outputs."""
+    combined = CombinedLoss(warmstart_epochs=0)
+    combined.set_epoch(1)
+    loss, _ = combined(
+        pred_heatmap=minimal_batch["pred_heatmap"],
+        pred_cumulative_bp=minimal_batch["pred_cumulative_bp"],
+        raw_velocity=minimal_batch["raw_velocity"],
+        reference_bp_positions_list=minimal_batch["ref_bp"],
+        n_ref_probes=minimal_batch["n_ref"],
+        warmstart_heatmap=None,
+        warmstart_valid=None,
+        mask=minimal_batch["mask"],
+    )
+    loss.backward()
+    assert minimal_batch["pred_heatmap"].grad is not None
+    assert minimal_batch["pred_cumulative_bp"].grad is not None
+    assert minimal_batch["raw_velocity"].grad is not None
+
+
+def test_combined_loss_skips_bp_when_too_few_peaks():
+    """If NMS returns <2 peaks, L_bp and L_velocity contributions are zero."""
+    length = 128
+    # Heatmap has no peaks above the NMS threshold.
+    pred_heatmap = torch.full((2, length), 0.05, requires_grad=True)
+    cum_bp = torch.stack(
+        [torch.linspace(0.0, 5000.0, length), torch.linspace(0.0, 5000.0, length)]
+    ).clone().requires_grad_(True)
+    raw_velocity = torch.full((2, length), 5.0).clone().requires_grad_(True)
+    ref_bp = [
+        torch.tensor([0, 1500, 3000], dtype=torch.int64),
+        torch.tensor([0, 1500, 3000], dtype=torch.int64),
+    ]
+    n_ref = torch.tensor([3, 3], dtype=torch.int64)
+    mask = torch.ones(2, length, dtype=torch.bool)
+
+    combined = CombinedLoss(warmstart_epochs=0, nms_threshold=0.3)
+    combined.set_epoch(1)
+    loss, details = combined(
+        pred_heatmap=pred_heatmap,
+        pred_cumulative_bp=cum_bp,
+        raw_velocity=raw_velocity,
+        reference_bp_positions_list=ref_bp,
+        n_ref_probes=n_ref,
+        warmstart_heatmap=None,
+        warmstart_valid=None,
+        mask=mask,
+    )
+    assert details["bp"] == 0.0
+    assert details["vel"] == 0.0
+    assert torch.isfinite(loss)
 
 
 def test_count_loss_exact_match():

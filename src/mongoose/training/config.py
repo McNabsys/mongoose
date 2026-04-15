@@ -30,7 +30,13 @@ class TrainConfig:
     # Loss
     lambda_bp: float = 1.0
     lambda_vel: float = 1.0
+    lambda_count: float = 1.0
     warmup_epochs: int = 5
+    warmstart_epochs: int = 5
+    warmstart_fade_epochs: int = 2
+    softdtw_gamma: float = 0.1
+    peakiness_window: int = 20
+    nms_threshold: float = 0.3
 
     # Checkpointing
     checkpoint_dir: Path = Path("checkpoints")
