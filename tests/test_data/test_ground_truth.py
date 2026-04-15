@@ -1,7 +1,6 @@
-"""Tests for the ground truth builder."""
+"""Tests for the V1 rearchitecture ground truth builder."""
 
 import numpy as np
-import pytest
 
 from mongoose.io.reference_map import load_reference_map
 from mongoose.io.probes_bin import load_probes_bin
@@ -9,7 +8,18 @@ from mongoose.io.assigns import load_assigns
 from mongoose.data.ground_truth import build_molecule_gt, MoleculeGT
 
 
-def test_build_gt_for_mapped_molecule(remap_allch_dir, sigproc_dir):
+def _first_mapped_clean(probes_file, assigns):
+    for assign in assigns[:50]:
+        if assign.ref_index < 0:
+            continue
+        mol = probes_file.molecules[assign.fragment_uid]
+        if mol.num_probes < 8 or mol.do_not_use:
+            continue
+        return mol, assign
+    return None, None
+
+
+def test_build_gt_reference_positions_populated(remap_allch_dir, sigproc_dir):
     ref = load_reference_map(
         remap_allch_dir / "STB03-064B-02L58270w05-202G16g_probes.txt_referenceMap.txt"
     )
@@ -20,53 +30,43 @@ def test_build_gt_for_mapped_molecule(remap_allch_dir, sigproc_dir):
         sigproc_dir / "STB03-064B-02L58270w05-202G16g_probes.bin",
         max_molecules=50,
     )
+    mol, assign = _first_mapped_clean(probes_file, assigns)
+    assert mol is not None
 
-    # Find first mapped, clean molecule with enough probes
-    for assign in assigns[:50]:
-        if assign.ref_index < 0:
-            continue
-        mol = probes_file.molecules[assign.fragment_uid]
-        if mol.num_probes < 8 or mol.do_not_use:
-            continue
-        gt = build_molecule_gt(mol, assign, ref)
-        assert gt is not None
-        assert isinstance(gt, MoleculeGT)
-        assert np.all(gt.inter_probe_deltas_bp > 0)
-        assert len(gt.inter_probe_deltas_bp) == len(gt.probe_sample_indices) - 1
-        assert len(gt.velocity_targets_bp_per_ms) == len(gt.probe_sample_indices)
-        assert np.all(gt.velocity_targets_bp_per_ms > 0)
-        assert gt.direction in (1, -1)
-        break
+    gt = build_molecule_gt(mol, assign, ref)
+    assert gt is not None
+    assert isinstance(gt, MoleculeGT)
+    assert gt.reference_bp_positions.dtype == np.int64
+    assert gt.n_ref_probes == len(gt.reference_bp_positions)
+    assert gt.n_ref_probes >= 4
+    # All values are within genome bounds
+    assert np.all(gt.reference_bp_positions >= 0)
+    assert np.all(gt.reference_bp_positions < ref.genome_length)
+
+
+def test_build_gt_reference_positions_ordered_by_direction(remap_allch_dir, sigproc_dir):
+    ref = load_reference_map(
+        remap_allch_dir / "STB03-064B-02L58270w05-202G16g_probes.txt_referenceMap.txt"
+    )
+    assigns = load_assigns(
+        remap_allch_dir / "STB03-064B-02L58270w05-202G16g_probes.txt_probeassignment.assigns"
+    )
+    probes_file = load_probes_bin(
+        sigproc_dir / "STB03-064B-02L58270w05-202G16g_probes.bin",
+        max_molecules=50,
+    )
+    mol, assign = _first_mapped_clean(probes_file, assigns)
+    gt = build_molecule_gt(mol, assign, ref)
+    assert gt is not None
+    if gt.direction == 1:
+        # Forward: ascending bp in temporal order
+        assert np.all(np.diff(gt.reference_bp_positions) > 0)
     else:
-        pytest.fail("No suitable mapped molecule found in first 50")
+        # Reverse: descending bp in temporal order (trailing-end first)
+        assert np.all(np.diff(gt.reference_bp_positions) < 0)
 
 
-def test_gt_deltas_sum_reasonable(remap_allch_dir, sigproc_dir):
-    ref = load_reference_map(
-        remap_allch_dir / "STB03-064B-02L58270w05-202G16g_probes.txt_referenceMap.txt"
-    )
-    assigns = load_assigns(
-        remap_allch_dir / "STB03-064B-02L58270w05-202G16g_probes.txt_probeassignment.assigns"
-    )
-    probes_file = load_probes_bin(
-        sigproc_dir / "STB03-064B-02L58270w05-202G16g_probes.bin",
-        max_molecules=50,
-    )
-    for assign in assigns[:50]:
-        if assign.ref_index < 0:
-            continue
-        mol = probes_file.molecules[assign.fragment_uid]
-        if mol.num_probes < 8 or mol.do_not_use:
-            continue
-        gt = build_molecule_gt(mol, assign, ref)
-        if gt is None:
-            continue
-        total_span = np.sum(gt.inter_probe_deltas_bp)
-        assert 0 < total_span < ref.genome_length
-        break
-
-
-def test_unmapped_molecule_returns_none(remap_allch_dir, sigproc_dir):
+def test_build_gt_unmapped_returns_none(remap_allch_dir, sigproc_dir):
     ref = load_reference_map(
         remap_allch_dir / "STB03-064B-02L58270w05-202G16g_probes.txt_referenceMap.txt"
     )
@@ -83,7 +83,7 @@ def test_unmapped_molecule_returns_none(remap_allch_dir, sigproc_dir):
     assert gt is None
 
 
-def test_sample_indices_are_sorted(remap_allch_dir, sigproc_dir):
+def test_build_gt_warmstart_fields_present(remap_allch_dir, sigproc_dir):
     ref = load_reference_map(
         remap_allch_dir / "STB03-064B-02L58270w05-202G16g_probes.txt_referenceMap.txt"
     )
@@ -94,15 +94,28 @@ def test_sample_indices_are_sorted(remap_allch_dir, sigproc_dir):
         sigproc_dir / "STB03-064B-02L58270w05-202G16g_probes.bin",
         max_molecules=50,
     )
-    for assign in assigns[:50]:
-        if assign.ref_index < 0:
-            continue
-        mol = probes_file.molecules[assign.fragment_uid]
-        if mol.num_probes < 8 or mol.do_not_use:
-            continue
-        gt = build_molecule_gt(mol, assign, ref)
-        if gt is None:
-            continue
-        # Sample indices must be in ascending temporal order
-        assert np.all(np.diff(gt.probe_sample_indices) > 0)
-        break
+    mol, assign = _first_mapped_clean(probes_file, assigns)
+    gt = build_molecule_gt(mol, assign, ref, include_warmstart=True)
+    assert gt is not None
+    assert gt.warmstart_probe_centers_samples is not None
+    assert gt.warmstart_probe_durations_samples is not None
+    assert len(gt.warmstart_probe_centers_samples) == len(gt.warmstart_probe_durations_samples)
+    assert len(gt.warmstart_probe_centers_samples) > 0
+
+
+def test_build_gt_warmstart_excluded(remap_allch_dir, sigproc_dir):
+    ref = load_reference_map(
+        remap_allch_dir / "STB03-064B-02L58270w05-202G16g_probes.txt_referenceMap.txt"
+    )
+    assigns = load_assigns(
+        remap_allch_dir / "STB03-064B-02L58270w05-202G16g_probes.txt_probeassignment.assigns"
+    )
+    probes_file = load_probes_bin(
+        sigproc_dir / "STB03-064B-02L58270w05-202G16g_probes.bin",
+        max_molecules=50,
+    )
+    mol, assign = _first_mapped_clean(probes_file, assigns)
+    gt = build_molecule_gt(mol, assign, ref, include_warmstart=False)
+    assert gt is not None
+    assert gt.warmstart_probe_centers_samples is None
+    assert gt.warmstart_probe_durations_samples is None

@@ -2,6 +2,24 @@
 
 Converts raw TDB waveform data (~900 GB) into a compact format (~5 GB)
 containing only clean, remapped molecules with ground truth annotations.
+
+V1 rearchitecture (R4):
+
+- Ground truth now primary-keys on ``reference_bp_positions`` (see
+  ``mongoose.data.ground_truth``). The deprecated ``probe_sample_indices``,
+  ``inter_probe_deltas_bp`` and ``velocity_targets_bp_per_ms`` fields are
+  no longer produced here -- those are derived at training time.
+- Mean level-1 backbone is now computed directly from the raw TDB waveform
+  via ``mongoose.data.level1.estimate_level1`` using the TDB rise/fall
+  edge indices, and stored as ``mean_lvl1_from_tdb``. This replaces the
+  wfmproc-provided ``mol.mean_lvl1`` in the conditioning vector (position 0)
+  and in the manifest.
+- ``molecules.pkl`` now contains dicts with keys:
+    reference_bp_positions, n_ref_probes, direction,
+    warmstart_probe_centers_samples, warmstart_probe_durations_samples.
+
+Cache format has CHANGED with this revision; any caches produced by the
+previous V1 preprocessing are INCOMPATIBLE and must be regenerated.
 """
 
 from __future__ import annotations
@@ -15,6 +33,7 @@ from pathlib import Path
 import numpy as np
 
 from mongoose.data.ground_truth import build_molecule_gt
+from mongoose.data.level1 import estimate_level1
 from mongoose.io.assigns import load_assigns
 from mongoose.io.probes_bin import load_probes_bin
 from mongoose.io.reference_map import load_reference_map
@@ -119,8 +138,14 @@ def preprocess_run(
                 continue
             stats.remapped_molecules += 1
 
-            # Build ground truth
-            gt = build_molecule_gt(mol, assign, ref, min_matched_probes=min_probes // 2)
+            # Build ground truth (new V1 schema)
+            gt = build_molecule_gt(
+                mol,
+                assign,
+                ref,
+                min_matched_probes=min_probes // 2,
+                include_warmstart=True,
+            )
             if gt is None:
                 continue
 
@@ -134,6 +159,15 @@ def preprocess_run(
             waveform = tdb_mol.waveform  # int16
             num_samples = len(waveform)
 
+            # Compute mean level-1 backbone directly from the raw waveform
+            # using the TDB rise/fall edges. This replaces the wfmproc
+            # ``mol.mean_lvl1`` as the conditioning-vector baseline proxy.
+            mean_lvl1_from_tdb = estimate_level1(
+                waveform,
+                rise_end_idx=int(tdb_mol.rise_conv_end_index),
+                fall_min_idx=int(tdb_mol.fall_conv_min_index),
+            )
+
             # Write waveform
             waveform_bytes = waveform.tobytes()
             waveform_file.write(waveform_bytes)
@@ -141,7 +175,7 @@ def preprocess_run(
             current_offset += len(waveform_bytes)
 
             # Build conditioning vector [6]:
-            # 0: Absolute pre-event baseline (mean_lvl1 in mV)
+            # 0: Absolute pre-event baseline (mean_lvl1_from_tdb, TDB-derived)
             # 1: log(molecule duration in samples)
             # 2: log(inter-event interval + 1) -- placeholder
             # 3: Time-in-run (fraction)
@@ -157,7 +191,7 @@ def preprocess_run(
 
             cond = np.array(
                 [
-                    mol.mean_lvl1,
+                    mean_lvl1_from_tdb,
                     np.log(max(1, duration_samples)),
                     np.log(inter_event_ms + 1),
                     time_in_run_frac,
@@ -168,26 +202,32 @@ def preprocess_run(
             )
             conditioning_rows.append(cond)
 
-            # Store GT as a plain dict with numpy arrays
+            # Store GT as a plain dict with numpy arrays (new V1 schema).
             gt_dict = {
-                "probe_sample_indices": gt.probe_sample_indices,
-                "inter_probe_deltas_bp": gt.inter_probe_deltas_bp,
-                "velocity_targets_bp_per_ms": gt.velocity_targets_bp_per_ms,
-                "reference_probe_bp": gt.reference_probe_bp,
+                "reference_bp_positions": gt.reference_bp_positions,
+                "n_ref_probes": gt.n_ref_probes,
                 "direction": gt.direction,
+                "warmstart_probe_centers_samples": gt.warmstart_probe_centers_samples,
+                "warmstart_probe_durations_samples": gt.warmstart_probe_durations_samples,
             }
             gt_list.append(gt_dict)
 
             # Manifest entry
+            num_matched_probes = (
+                len(gt.warmstart_probe_centers_samples)
+                if gt.warmstart_probe_centers_samples is not None
+                else 0
+            )
             manifest_entries.append(
                 {
                     "uid": int(mol.uid),
                     "channel": int(mol.channel),
                     "num_samples": num_samples,
                     "num_probes": int(mol.num_probes),
-                    "num_matched_probes": len(gt.probe_sample_indices),
+                    "n_ref_probes": int(gt.n_ref_probes),
+                    "num_matched_probes": int(num_matched_probes),
                     "transloc_time_ms": float(mol.transloc_time_ms),
-                    "mean_lvl1": float(mol.mean_lvl1),
+                    "mean_lvl1_from_tdb": float(mean_lvl1_from_tdb),
                     "direction": gt.direction,
                     "amplitude_scale": float(channel_to_scale.get(mol.channel, 1.0)),
                 }

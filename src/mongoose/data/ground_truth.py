@@ -1,6 +1,24 @@
-"""Ground truth builder: maps detected probes to reference genome positions.
+"""Ground truth builder: maps matched probes to reference genome positions.
 
-Produces shift-invariant inter-probe deltas for training the U-Net model.
+V1 rearchitecture (R4):
+
+The primary ground truth is now ``reference_bp_positions`` -- the ordered
+list of reference basepair coordinates derived from the aligner's
+``probe_indices``. This drops the wfmproc-derived ``probe_sample_indices``,
+``inter_probe_deltas_bp`` and ``velocity_targets_bp_per_ms`` as primary
+training signal; those quantities are now derived during training from
+detected peaks and heatmap widths instead of at preprocessing time.
+
+The wfmproc probe centers and durations are still retained, optionally,
+as ``warmstart_probe_*`` arrays. They are consumed during the first 3-5
+epochs of training to warmstart ``L_probe`` while the model bootstraps
+peak detection.
+
+Direction convention used by this module:
+
+    direction == 1  (forward): temporal order corresponds to ASCENDING bp.
+    direction == -1 (reverse): temporal order corresponds to DESCENDING bp
+                               (the molecule entered trailing-end first).
 """
 
 from __future__ import annotations
@@ -20,28 +38,49 @@ SAMPLE_PERIOD_MS = 1000.0 / SAMPLE_RATE_HZ  # 0.025 ms
 
 @dataclass
 class MoleculeGT:
-    """Ground truth for a single molecule."""
+    """Ground truth for a single molecule (V1 rearchitecture schema).
 
-    probe_sample_indices: np.ndarray  # int64, temporal sample index of each matched probe
-    inter_probe_deltas_bp: np.ndarray  # float64, abs(diff(ref_bp)), always positive
-    velocity_targets_bp_per_ms: np.ndarray  # float64, TAG_WIDTH_BP / duration per matched probe
-    reference_probe_bp: np.ndarray  # int64, absolute ref bp for each matched probe
-    direction: int  # 1 = forward, -1 = reverse
+    Attributes:
+        reference_bp_positions: int64 array of reference bp coordinates,
+            sorted in temporal order given ``direction``. Primary GT.
+        n_ref_probes: len(reference_bp_positions); used as target for the
+            L_count regression head.
+        direction: 1 = forward (ascending bp in temporal order),
+                   -1 = reverse (descending bp in temporal order).
+        warmstart_probe_centers_samples: int64 array of wfmproc probe
+            center sample indices, one per matched probe (aligned to
+            ``reference_bp_positions``). Optional: None when warmstart
+            labels are not requested or unavailable.
+        warmstart_probe_durations_samples: float32 array of wfmproc probe
+            durations in samples. Optional, same pairing as centers.
+    """
+
+    reference_bp_positions: np.ndarray
+    n_ref_probes: int
+    direction: int
+    warmstart_probe_centers_samples: np.ndarray | None = None
+    warmstart_probe_durations_samples: np.ndarray | None = None
 
 
 def build_molecule_gt(
     mol: Molecule,
     assign: MoleculeAssignment,
     ref: ReferenceMap,
+    *,
     min_matched_probes: int = 4,
+    include_warmstart: bool = True,
 ) -> MoleculeGT | None:
-    """Build ground truth for a single molecule from its assignment.
+    """Build V1 ground truth for a single molecule from its assignment.
 
     Args:
         mol: Molecule from probes.bin with detected probe events.
         assign: Assignment mapping this molecule's probes to reference probes.
         ref: Reference map with known probe positions on the genome.
         min_matched_probes: Minimum number of matched probes required.
+            Keyword-only.
+        include_warmstart: If True, populate the warmstart_* fields using
+            wfmproc probe centers and durations (only for probes with
+            duration > 0). Keyword-only.
 
     Returns:
         MoleculeGT if enough probes matched, None otherwise.
@@ -49,51 +88,70 @@ def build_molecule_gt(
     if assign.ref_index < 0:
         return None
 
-    sample_indices: list[int] = []
-    ref_bps: list[int] = []
-    velocities: list[float] = []
-
+    # Collect (molecule_probe_idx, reference_bp) pairs for all matched probes.
+    # Preserve encounter order so we can deduplicate consecutive duplicates
+    # while keeping temporal pairing for the warmstart arrays.
+    matched: list[tuple[int, int]] = []  # (molecule probe index, ref bp)
     for i, ref_probe_idx in enumerate(assign.probe_indices):
-        # 0 means unmatched probe
+        # 0 indicates an unmatched probe slot in the aligner output.
         if ref_probe_idx == 0:
             continue
 
-        # Guard against out-of-range molecule probe index
-        if i >= len(mol.probes):
-            continue
+        # Convert 1-based reference probe index to 0-based ref-map lookup.
+        bp = int(ref.probe_positions[ref_probe_idx - 1])
+        matched.append((i, bp))
 
-        probe = mol.probes[i]
-
-        # Skip probes with invalid duration
-        if probe.duration_ms <= 0:
-            continue
-
-        # Convert 1-based reference probe index to 0-based and look up bp position
-        bp = ref.probe_positions[ref_probe_idx - 1]
-
-        sample_idx = int(round(probe.center_ms / SAMPLE_PERIOD_MS))
-        velocity = TAG_WIDTH_BP / probe.duration_ms
-
-        sample_indices.append(sample_idx)
-        ref_bps.append(bp)
-        velocities.append(velocity)
-
-    if len(sample_indices) < min_matched_probes:
+    if not matched:
         return None
 
-    # Sort all matched data by temporal sample index
-    sort_order = np.argsort(sample_indices)
-    sample_indices_arr = np.array(sample_indices, dtype=np.int64)[sort_order]
-    ref_bps_arr = np.array(ref_bps, dtype=np.int64)[sort_order]
-    velocities_arr = np.array(velocities, dtype=np.float64)[sort_order]
+    # Deduplicate reference bp positions while preserving order. For each
+    # unique bp we keep the first occurrence (and its associated molecule
+    # probe index) so the warmstart arrays remain paired 1:1 with the
+    # reference bp positions.
+    seen_bps: set[int] = set()
+    unique_matched: list[tuple[int, int]] = []
+    for mol_probe_idx, bp in matched:
+        if bp in seen_bps:
+            continue
+        seen_bps.add(bp)
+        unique_matched.append((mol_probe_idx, bp))
 
-    # Shift-invariant inter-probe deltas: abs(diff()) handles both orientations
-    deltas = np.abs(np.diff(ref_bps_arr)).astype(np.float64)
+    if len(unique_matched) < min_matched_probes:
+        return None
+
+    # Sort by reference bp -- direction controls ascending vs descending.
+    # Forward (direction == 1): temporal order == ascending bp.
+    # Reverse (direction == -1): temporal order == descending bp.
+    reverse = assign.direction != 1
+    unique_matched.sort(key=lambda pair: pair[1], reverse=reverse)
+
+    reference_bp_positions = np.array(
+        [bp for _, bp in unique_matched], dtype=np.int64
+    )
+
+    warmstart_centers: np.ndarray | None = None
+    warmstart_durations: np.ndarray | None = None
+
+    if include_warmstart:
+        centers: list[int] = []
+        durations: list[float] = []
+        for mol_probe_idx, _bp in unique_matched:
+            if mol_probe_idx >= len(mol.probes):
+                continue
+            probe = mol.probes[mol_probe_idx]
+            if probe.duration_ms <= 0:
+                continue
+            centers.append(int(round(probe.center_ms / SAMPLE_PERIOD_MS)))
+            durations.append(float(probe.duration_ms / SAMPLE_PERIOD_MS))
+
+        if centers:
+            warmstart_centers = np.array(centers, dtype=np.int64)
+            warmstart_durations = np.array(durations, dtype=np.float32)
 
     return MoleculeGT(
-        probe_sample_indices=sample_indices_arr,
-        inter_probe_deltas_bp=deltas,
-        velocity_targets_bp_per_ms=velocities_arr,
-        reference_probe_bp=ref_bps_arr,
-        direction=assign.direction,
+        reference_bp_positions=reference_bp_positions,
+        n_ref_probes=len(reference_bp_positions),
+        direction=int(assign.direction),
+        warmstart_probe_centers_samples=warmstart_centers,
+        warmstart_probe_durations_samples=warmstart_durations,
     )

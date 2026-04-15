@@ -1,10 +1,14 @@
-"""Tests for the preprocessing pipeline.
+"""Tests for the preprocessing pipeline (V1 rearchitecture, R4).
 
 Since preprocess_run requires matching TDB + probes.bin + assigns data,
 full integration testing requires real data. These tests focus on:
-1. PreprocessStats dataclass behavior
-2. Output file format validation on mocked data
-3. The preprocess_run function with a fully mocked IO layer
+1. PreprocessStats dataclass behavior.
+2. Output file format validation on mocked data.
+3. The preprocess_run function with a fully mocked IO layer.
+4. New V1 GT schema (reference_bp_positions, n_ref_probes, direction,
+   warmstart_* fields) in the cached molecules.pkl.
+5. The TDB-derived mean_lvl1_from_tdb field in the manifest and
+   conditioning vector (replacing the wfmproc mean_lvl1).
 """
 
 import json
@@ -13,7 +17,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from mongoose.data.preprocess import PreprocessStats, preprocess_run
 
@@ -55,15 +58,38 @@ def _make_mock_molecule(
     return mol
 
 
-def _make_mock_gt():
-    """Create a mock MoleculeGT object."""
+def _make_mock_gt(
+    reference_bp_positions=None,
+    direction=1,
+    warmstart_centers=None,
+    warmstart_durations=None,
+):
+    """Create a mock MoleculeGT object with the new V1 schema."""
+    if reference_bp_positions is None:
+        reference_bp_positions = np.array([1000, 2000, 3500, 5500], dtype=np.int64)
+    if warmstart_centers is None:
+        warmstart_centers = np.array([100, 200, 300, 400], dtype=np.int64)
+    if warmstart_durations is None:
+        warmstart_durations = np.array([40.0, 42.0, 41.0, 39.0], dtype=np.float32)
+
     gt = MagicMock()
-    gt.probe_sample_indices = np.array([100, 200, 300, 400], dtype=np.int64)
-    gt.inter_probe_deltas_bp = np.array([1000.0, 1500.0, 2000.0], dtype=np.float64)
-    gt.velocity_targets_bp_per_ms = np.array([400.0, 350.0, 300.0, 280.0], dtype=np.float64)
-    gt.reference_probe_bp = np.array([1000, 2000, 3500, 5500], dtype=np.int64)
-    gt.direction = 1
+    gt.reference_bp_positions = reference_bp_positions
+    gt.n_ref_probes = len(reference_bp_positions)
+    gt.direction = direction
+    gt.warmstart_probe_centers_samples = warmstart_centers
+    gt.warmstart_probe_durations_samples = warmstart_durations
     return gt
+
+
+def _make_mock_tdb_molecule(waveform, rise_end=10, fall_min=None):
+    """Create a mock TdbMolecule with the fields preprocess_run needs."""
+    if fall_min is None:
+        fall_min = max(rise_end + 10, len(waveform) - 10)
+    tdb_mol = MagicMock()
+    tdb_mol.waveform = waveform
+    tdb_mol.rise_conv_end_index = rise_end
+    tdb_mol.fall_conv_min_index = fall_min
+    return tdb_mol
 
 
 @patch("mongoose.data.preprocess.build_molecule_gt")
@@ -121,15 +147,14 @@ def test_preprocess_run_creates_output_files(
     mock_ref_map.return_value = MagicMock()
 
     # Mock ground truth
-    gt = _make_mock_gt()
-    mock_build_gt.return_value = gt
+    mock_build_gt.return_value = _make_mock_gt()
 
     # Mock TDB molecule with waveform
-    tdb_mol = MagicMock()
-    tdb_mol.waveform = np.ones(500, dtype=np.int16) * 400
-    mock_load_tdb_mol.return_value = tdb_mol
+    mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
+        np.ones(500, dtype=np.int16) * 400
+    )
 
-    stats = preprocess_run(
+    preprocess_run(
         run_id="test_run",
         tdb_path=Path("fake.tdb"),
         probes_bin_path=Path("fake_probes.bin"),
@@ -188,13 +213,11 @@ def test_preprocess_run_stats(
     mock_assigns.return_value = [assign_mapped, assign_mapped]
 
     mock_ref_map.return_value = MagicMock()
+    mock_build_gt.return_value = _make_mock_gt()
 
-    gt = _make_mock_gt()
-    mock_build_gt.return_value = gt
-
-    tdb_mol = MagicMock()
-    tdb_mol.waveform = np.ones(300, dtype=np.int16) * 400
-    mock_load_tdb_mol.return_value = tdb_mol
+    mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
+        np.ones(300, dtype=np.int16) * 400
+    )
 
     stats = preprocess_run(
         run_id="stats_test",
@@ -227,7 +250,7 @@ def test_preprocess_run_manifest_content(
     mock_build_gt,
     tmp_path,
 ):
-    """Verify manifest.json has expected structure and values."""
+    """Verify manifest.json has expected structure and values (new V1 schema)."""
     header = MagicMock()
     header.channel_ids = [2]
     header.amplitude_scale_factors = [1.0]
@@ -250,13 +273,11 @@ def test_preprocess_run_manifest_content(
     mock_assigns.return_value = [assign] * 6
 
     mock_ref_map.return_value = MagicMock()
+    mock_build_gt.return_value = _make_mock_gt()
 
-    gt = _make_mock_gt()
-    mock_build_gt.return_value = gt
-
-    tdb_mol = MagicMock()
-    tdb_mol.waveform = np.ones(400, dtype=np.int16) * 500
-    mock_load_tdb_mol.return_value = tdb_mol
+    mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
+        np.ones(400, dtype=np.int16) * 500
+    )
 
     preprocess_run(
         run_id="manifest_test",
@@ -280,6 +301,12 @@ def test_preprocess_run_manifest_content(
     assert mol_entry["channel"] == 2
     assert mol_entry["num_samples"] == 400
     assert mol_entry["direction"] == 1
+    # New V1 fields.
+    assert "n_ref_probes" in mol_entry
+    assert mol_entry["n_ref_probes"] == 4  # from default _make_mock_gt
+    assert "mean_lvl1_from_tdb" in mol_entry
+    # The old wfmproc mean_lvl1 field is no longer in the manifest.
+    assert "mean_lvl1" not in mol_entry
 
 
 @patch("mongoose.data.preprocess.build_molecule_gt")
@@ -322,9 +349,7 @@ def test_preprocess_run_waveform_data(
     mock_build_gt.return_value = _make_mock_gt()
 
     waveform_data = np.arange(200, dtype=np.int16)
-    tdb_mol = MagicMock()
-    tdb_mol.waveform = waveform_data
-    mock_load_tdb_mol.return_value = tdb_mol
+    mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(waveform_data)
 
     preprocess_run(
         run_id="wfm_test",
@@ -384,9 +409,9 @@ def test_preprocess_filters_low_probe_count(
     mock_ref_map.return_value = MagicMock()
     mock_build_gt.return_value = _make_mock_gt()
 
-    tdb_mol = MagicMock()
-    tdb_mol.waveform = np.ones(100, dtype=np.int16)
-    mock_load_tdb_mol.return_value = tdb_mol
+    mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
+        np.ones(100, dtype=np.int16)
+    )
 
     stats = preprocess_run(
         run_id="filter_test",
@@ -438,9 +463,9 @@ def test_preprocess_filters_short_transloc(
     mock_ref_map.return_value = MagicMock()
     mock_build_gt.return_value = _make_mock_gt()
 
-    tdb_mol = MagicMock()
-    tdb_mol.waveform = np.ones(100, dtype=np.int16)
-    mock_load_tdb_mol.return_value = tdb_mol
+    mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
+        np.ones(100, dtype=np.int16)
+    )
 
     stats = preprocess_run(
         run_id="transloc_test",
@@ -453,3 +478,164 @@ def test_preprocess_filters_short_transloc(
 
     assert stats.clean_molecules == 0
     assert stats.cached_molecules == 0
+
+
+@patch("mongoose.data.preprocess.build_molecule_gt")
+@patch("mongoose.data.preprocess.load_tdb_molecule")
+@patch("mongoose.data.preprocess.load_reference_map")
+@patch("mongoose.data.preprocess.load_assigns")
+@patch("mongoose.data.preprocess.load_probes_bin")
+@patch("mongoose.data.preprocess.load_tdb_header")
+def test_preprocess_molecules_pkl_new_schema(
+    mock_tdb_header,
+    mock_probes_bin,
+    mock_assigns,
+    mock_ref_map,
+    mock_load_tdb_mol,
+    mock_build_gt,
+    tmp_path,
+):
+    """molecules.pkl stores the V1 GT schema (no deprecated fields)."""
+    header = MagicMock()
+    header.channel_ids = [2]
+    header.amplitude_scale_factors = [1.0]
+    mock_tdb_header.return_value = header
+
+    mol = _make_mock_molecule(
+        uid=0, channel=2, num_probes=10, transloc_time_ms=50.0,
+        mean_lvl1=0.5,
+    )
+
+    probes_file = MagicMock()
+    probes_file.num_molecules = 1
+    probes_file.molecules = [mol]
+    probes_file.last_sample_time = 100.0
+    mock_probes_bin.return_value = probes_file
+
+    mock_assigns.return_value = [MagicMock(ref_index=0)]
+    mock_ref_map.return_value = MagicMock()
+
+    ref_bp = np.array([100, 500, 900, 1500, 2100], dtype=np.int64)
+    centers = np.array([20, 40, 60, 80, 100], dtype=np.int64)
+    durations = np.array([10.0, 11.0, 9.0, 12.0, 10.5], dtype=np.float32)
+    mock_build_gt.return_value = _make_mock_gt(
+        reference_bp_positions=ref_bp,
+        direction=-1,
+        warmstart_centers=centers,
+        warmstart_durations=durations,
+    )
+
+    mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
+        np.ones(300, dtype=np.int16)
+    )
+
+    preprocess_run(
+        run_id="schema_test",
+        tdb_path=Path("fake.tdb"),
+        probes_bin_path=Path("fake_probes.bin"),
+        assigns_path=Path("fake.assigns"),
+        reference_map_path=Path("fake_ref.txt"),
+        output_dir=tmp_path,
+    )
+
+    with open(tmp_path / "schema_test" / "molecules.pkl", "rb") as f:
+        gt_list = pickle.load(f)
+
+    assert len(gt_list) == 1
+    entry = gt_list[0]
+    # New schema keys are present.
+    assert "reference_bp_positions" in entry
+    assert "n_ref_probes" in entry
+    assert "direction" in entry
+    assert "warmstart_probe_centers_samples" in entry
+    assert "warmstart_probe_durations_samples" in entry
+    # Deprecated keys are NOT present.
+    assert "probe_sample_indices" not in entry
+    assert "inter_probe_deltas_bp" not in entry
+    assert "velocity_targets_bp_per_ms" not in entry
+    assert "reference_probe_bp" not in entry
+
+    np.testing.assert_array_equal(entry["reference_bp_positions"], ref_bp)
+    assert entry["n_ref_probes"] == len(ref_bp)
+    assert entry["direction"] == -1
+    np.testing.assert_array_equal(entry["warmstart_probe_centers_samples"], centers)
+    np.testing.assert_array_equal(entry["warmstart_probe_durations_samples"], durations)
+
+
+@patch("mongoose.data.preprocess.estimate_level1")
+@patch("mongoose.data.preprocess.build_molecule_gt")
+@patch("mongoose.data.preprocess.load_tdb_molecule")
+@patch("mongoose.data.preprocess.load_reference_map")
+@patch("mongoose.data.preprocess.load_assigns")
+@patch("mongoose.data.preprocess.load_probes_bin")
+@patch("mongoose.data.preprocess.load_tdb_header")
+def test_preprocess_computes_mean_lvl1_from_tdb(
+    mock_tdb_header,
+    mock_probes_bin,
+    mock_assigns,
+    mock_ref_map,
+    mock_load_tdb_mol,
+    mock_build_gt,
+    mock_estimate_level1,
+    tmp_path,
+):
+    """estimate_level1 is invoked per molecule, and its value is stored.
+
+    The manifest's ``mean_lvl1_from_tdb`` and the conditioning vector's
+    position 0 must both come from ``estimate_level1`` (TDB-derived), not
+    from the wfmproc ``mol.mean_lvl1``.
+    """
+    header = MagicMock()
+    header.channel_ids = [2]
+    header.amplitude_scale_factors = [1.0]
+    mock_tdb_header.return_value = header
+
+    mol = _make_mock_molecule(
+        uid=0, channel=2, num_probes=10, transloc_time_ms=50.0,
+        mean_lvl1=0.5,  # wfmproc value, should NOT be stored
+    )
+
+    probes_file = MagicMock()
+    probes_file.num_molecules = 1
+    probes_file.molecules = [mol]
+    probes_file.last_sample_time = 100.0
+    mock_probes_bin.return_value = probes_file
+
+    mock_assigns.return_value = [MagicMock(ref_index=0)]
+    mock_ref_map.return_value = MagicMock()
+    mock_build_gt.return_value = _make_mock_gt()
+
+    tdb_mol = _make_mock_tdb_molecule(
+        np.ones(300, dtype=np.int16) * 400,
+        rise_end=5,
+        fall_min=290,
+    )
+    mock_load_tdb_mol.return_value = tdb_mol
+
+    tdb_lvl1 = 1234.5
+    mock_estimate_level1.return_value = tdb_lvl1
+
+    preprocess_run(
+        run_id="lvl1_test",
+        tdb_path=Path("fake.tdb"),
+        probes_bin_path=Path("fake_probes.bin"),
+        assigns_path=Path("fake.assigns"),
+        reference_map_path=Path("fake_ref.txt"),
+        output_dir=tmp_path,
+    )
+
+    # estimate_level1 called once (one cached molecule) with TDB indices.
+    assert mock_estimate_level1.call_count == 1
+    _args, kwargs = mock_estimate_level1.call_args
+    assert kwargs["rise_end_idx"] == 5
+    assert kwargs["fall_min_idx"] == 290
+
+    # Manifest carries the TDB-derived level-1.
+    with open(tmp_path / "lvl1_test" / "manifest.json") as f:
+        manifest = json.load(f)
+    assert manifest["molecules"][0]["mean_lvl1_from_tdb"] == tdb_lvl1
+
+    # Conditioning vector position 0 matches.
+    cond = np.load(tmp_path / "lvl1_test" / "conditioning.npy")
+    assert cond.shape == (1, 6)
+    assert cond[0, 0] == np.float32(tdb_lvl1)
