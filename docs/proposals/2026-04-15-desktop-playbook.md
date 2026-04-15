@@ -37,14 +37,20 @@ git remote remove origin   # optional, removes the bundle reference
 
 ```bash
 git log --oneline -10
+git branch -a
 ```
 
-You should see the recent commits including:
-- `Add v2 deck outline with rich, paragraph-level slides`
-- `Add detailed presenter talking points for deck slides 4-16`
-- `Add deck outline correcting Gemini-generated overclaims`
-- `Add V1 diagnostics: peak-count discrepancy + ablation comparison`
-- `Add preprocessing sanity-check script for single-run validation`
+You should see two branches:
+- `main` -- original V1 (complete, 124 tests passing, preserved as fallback)
+- `v1-rearchitecture` -- V1 pivoted to self-supervised probe detection (2026-04-15)
+
+**Check out the rearchitecture branch before proceeding:**
+
+```bash
+git checkout v1-rearchitecture
+```
+
+The code on this branch is partially in-progress -- only the design doc and implementation plan are committed. Task R1-R7 code changes still need to be executed (via subagents during the session). See `docs/plans/2026-04-15-t2d-unet-implementation-v2.md` for the task list.
 
 ### 3. (Optional but recommended) Copy memory from laptop
 
@@ -93,25 +99,34 @@ Note the GPU model and VRAM. You'll want at least 8 GB; more is better.
 
 ## Part 2 -- Starting the Claude Session
 
-Open Claude Code in `C:/git/mongoose`. Paste this as your first message:
+Open Claude Code in `C:/git/mongoose`. **Verify you're on branch `v1-rearchitecture`** (`git status` should show it). Paste this as your first message:
 
-> I'm continuing work on Project Mongoose from a fresh session on my desktop. Memory should be loaded with prior context (architecture decisions, V1 scope, preprocessing strategy). 
+> I'm continuing work on Project Mongoose from a fresh session on my desktop. I'm on branch `v1-rearchitecture` which contains the V1 pivot to self-supervised probe detection (soft-DTW L_bp, dense L_velocity, warmstart phase). The original V1 is preserved on `main` as a fallback.
 >
-> Status: I've cloned the repo, installed dependencies, and 124 tests pass. I have all 30 E. coli runs downloaded locally. Data layout is `<paste your actual layout here>`. GPU available: `<paste your nvidia-smi output here>`.
+> Memory should be loaded. In particular, read `project_v1_rearchitecture.md` for the pivot context.
+>
+> Status: I've cloned the repo, installed dependencies, and the test suite on main passes (124 tests). This branch has the new design doc and implementation plan committed but the Task R1-R7 code changes are not yet implemented. I have all 30 E. coli runs downloaded locally. Data layout is `<paste your actual layout here>`. GPU available: `<paste your nvidia-smi output here>`.
 >
 > Tonight's goals, in order:
-> 1. Sanity-check preprocessing on one run (use STB03-064B-02L58270w05-202G16g if available)
-> 2. Review the summary stats with me before batch-processing
-> 3. Add a batch preprocessing script and a training-manifest builder (these don't exist yet)
-> 4. Batch preprocess all 30 runs
-> 5. Local smoke test (`scripts/train.py --epochs 2 --batch-size 2 --no-amp`) on the real preprocessed data
-> 6. If smoke test passes, install CUDA PyTorch and re-run with `--amp` to verify GPU training works
+> 1. Execute Tasks R1-R7 from `docs/plans/2026-04-15-t2d-unet-implementation-v2.md` via subagents (level-1 estimator, soft-DTW, count/peakiness losses, ground truth revision, loss composition, dataset integration, smoke test). Use subagent-driven-development for this.
+> 2. Once R7 passes on synthetic data, build `scripts/batch_preprocess.py` and `scripts/build_manifest.py` (these don't exist yet)
+> 3. Sanity-check preprocessing on one real run (use STB03-064B-02L58270w05-202G16g if available)
+> 4. Review summary stats with me before batch-processing all 30
+> 5. Batch preprocess all 30 runs
+> 6. Local smoke test on real preprocessed data
+> 7. If smoke test passes, install CUDA PyTorch and re-run with `--amp` to verify GPU training works
 >
-> Please confirm you have memory loaded (specifically the V1 scope decisions and ground truth strategy notes) before we start. Then walk me through step 1.
+> Step 1 is the biggest block. Please start by reading the implementation plan, summarize the R1-R7 task structure, and dispatch the first subagent. If there are ambiguities in the plan, ask me to resolve them first.
 
 ---
 
 ## Part 3 -- Expected Session Flow
+
+### Phase 0: Execute V1 rearchitecture code changes (60-120 minutes)
+
+Claude will run the subagent-driven-development workflow over tasks R1-R7 from the implementation plan. Each task is small (15-20 minutes per subagent dispatch, with spec/quality review between). Total: 1-2 hours.
+
+At the end, `pytest -q` should report ~140+ passing tests (124 existing + new tests from R1-R5) and the synthetic smoke test should complete 3 epochs with warmstart transitioning mid-run.
 
 ### Phase 1: Sanity-check (15-30 minutes)
 
