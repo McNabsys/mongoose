@@ -30,9 +30,18 @@ class Trainer:
             self.device
         )
 
-        # Loss
+        # Loss (V1 rearchitecture: CombinedLoss takes the full scheduler +
+        # detection params from the training config).
         self.criterion = CombinedLoss(
-            config.lambda_bp, config.lambda_vel, config.warmup_epochs
+            lambda_bp=config.lambda_bp,
+            lambda_vel=config.lambda_vel,
+            lambda_count=config.lambda_count,
+            warmup_epochs=config.warmup_epochs,
+            warmstart_epochs=config.warmstart_epochs,
+            warmstart_fade_epochs=config.warmstart_fade_epochs,
+            softdtw_gamma=config.softdtw_gamma,
+            peakiness_window=config.peakiness_window,
+            nms_threshold=config.nms_threshold,
         )
 
         # Optimizer
@@ -118,10 +127,12 @@ class Trainer:
                 "train_probe": train_metrics["probe_loss"],
                 "train_bp": train_metrics["bp_loss"],
                 "train_vel": train_metrics["vel_loss"],
+                "train_count": train_metrics["count_loss"],
                 "val_loss": val_metrics["loss"],
                 "val_probe": val_metrics["probe_loss"],
                 "val_bp": val_metrics["bp_loss"],
                 "val_vel": val_metrics["vel_loss"],
+                "val_count": val_metrics["count_loss"],
                 "lr": self.optimizer.param_groups[0]["lr"],
             }
             self.epoch_metrics.append(combined)
@@ -136,6 +147,7 @@ class Trainer:
         total_probe = 0.0
         total_bp = 0.0
         total_vel = 0.0
+        total_count = 0.0
         num_batches = 0
 
         for batch in self.train_loader:
@@ -151,9 +163,10 @@ class Trainer:
             self.scaler.update()
 
             total_loss += loss.item()
-            total_probe += details["probe_loss"].item()
-            total_bp += details["bp_loss"].item()
-            total_vel += details["vel_loss"].item()
+            total_probe += float(details["probe"])
+            total_bp += float(details["bp"])
+            total_vel += float(details["vel"])
+            total_count += float(details["count"])
             num_batches += 1
 
         n = max(num_batches, 1)
@@ -162,6 +175,7 @@ class Trainer:
             "probe_loss": total_probe / n,
             "bp_loss": total_bp / n,
             "vel_loss": total_vel / n,
+            "count_loss": total_count / n,
         }
 
     @torch.no_grad()
@@ -172,14 +186,16 @@ class Trainer:
         total_probe = 0.0
         total_bp = 0.0
         total_vel = 0.0
+        total_count = 0.0
         num_batches = 0
 
         for batch in self.val_loader:
             loss, details = self._step(batch)
             total_loss += loss.item()
-            total_probe += details["probe_loss"].item()
-            total_bp += details["bp_loss"].item()
-            total_vel += details["vel_loss"].item()
+            total_probe += float(details["probe"])
+            total_bp += float(details["bp"])
+            total_vel += float(details["vel"])
+            total_count += float(details["count"])
             num_batches += 1
 
         n = max(num_batches, 1)
@@ -188,6 +204,7 @@ class Trainer:
             "probe_loss": total_probe / n,
             "bp_loss": total_bp / n,
             "vel_loss": total_vel / n,
+            "count_loss": total_count / n,
         }
 
     def _step(self, batch: dict) -> tuple[torch.Tensor, dict[str, Any]]:
@@ -195,12 +212,19 @@ class Trainer:
         waveform = batch["waveform"].to(self.device)
         conditioning = batch["conditioning"].to(self.device)
         mask = batch["mask"].to(self.device)
-        target_heatmap = batch["probe_heatmap"].to(self.device)
 
-        # Move per-sample tensors to device
-        probe_indices_list = [t.to(self.device) for t in batch["probe_sample_indices"]]
-        gt_deltas_list = [t.to(self.device) for t in batch["gt_deltas_bp"]]
-        velocity_targets_list = [t.to(self.device) for t in batch["velocity_targets"]]
+        # Move per-molecule reference bp tensors to device.
+        reference_bp_positions_list = [
+            bp.to(self.device) for bp in batch["reference_bp_positions"]
+        ]
+        n_ref_probes = batch["n_ref_probes"].to(self.device)
+
+        warmstart_heatmap = batch.get("warmstart_heatmap")
+        if warmstart_heatmap is not None:
+            warmstart_heatmap = warmstart_heatmap.to(self.device)
+        warmstart_valid = batch.get("warmstart_valid")
+        if warmstart_valid is not None:
+            warmstart_valid = warmstart_valid.to(self.device)
 
         with torch.amp.autocast(
             "cuda", enabled=self.config.use_amp and self.device.type == "cuda"
@@ -213,10 +237,10 @@ class Trainer:
                 pred_heatmap=probe_heatmap,
                 pred_cumulative_bp=cumulative_bp,
                 raw_velocity=raw_velocity,
-                target_heatmap=target_heatmap,
-                probe_indices_list=probe_indices_list,
-                gt_deltas_list=gt_deltas_list,
-                velocity_targets_list=velocity_targets_list,
+                reference_bp_positions_list=reference_bp_positions_list,
+                n_ref_probes=n_ref_probes,
+                warmstart_heatmap=warmstart_heatmap,
+                warmstart_valid=warmstart_valid,
                 mask=mask,
             )
 
@@ -231,6 +255,7 @@ class Trainer:
             f"probe={train_metrics['probe_loss']:.4f} | "
             f"bp={train_metrics['bp_loss']:.4f} | "
             f"vel={train_metrics['vel_loss']:.4f} | "
+            f"count={train_metrics['count_loss']:.4f} | "
             f"val_loss={val_metrics['loss']:.4f} | "
             f"lr={lr:.6f}"
         )

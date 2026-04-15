@@ -4,8 +4,15 @@ Loads compact training data written by preprocess.py:
     waveforms.bin  -- memory-mapped int16 waveforms
     offsets.npy    -- byte offsets and sample counts
     conditioning.npy -- float32 conditioning vectors
-    molecules.pkl  -- per-molecule ground truth dicts
+    molecules.pkl  -- per-molecule ground truth dicts (V1 schema)
     manifest.json  -- metadata and per-molecule info
+
+V1 rearchitecture (R6): items emitted by ``__getitem__`` carry the new
+schema -- ``reference_bp_positions``, ``n_ref_probes``, and an optional
+``warmstart_heatmap`` built in-memory from the cached
+``warmstart_probe_centers_samples`` / ``warmstart_probe_durations_samples``
+arrays. The legacy probe_sample_indices / gt_deltas_bp / velocity_targets
+fields are no longer produced.
 """
 
 from __future__ import annotations
@@ -18,7 +25,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from mongoose.data.ground_truth import SAMPLE_PERIOD_MS, TAG_WIDTH_BP
 from mongoose.data.heatmap import build_probe_heatmap
 
 
@@ -60,7 +66,7 @@ class CachedMoleculeDataset(Dataset):
                 gt_list = pickle.load(f)
             self.gt_lists.append(gt_list)
 
-            # Memory-map the waveform file for fast random access
+            # Memory-map the waveform file for fast random access.
             wfm_path = cache_dir / "waveforms.bin"
             wfm_size = wfm_path.stat().st_size
             if wfm_size > 0:
@@ -70,7 +76,6 @@ class CachedMoleculeDataset(Dataset):
             else:
                 self.waveform_files.append(np.array([], dtype=np.int16))
 
-            # Add entries to global index
             dir_idx = len(self.manifests) - 1
             for mol_idx in range(len(offsets)):
                 self.entries.append((dir_idx, mol_idx))
@@ -83,7 +88,7 @@ class CachedMoleculeDataset(Dataset):
         manifest = self.manifests[dir_idx]
         mol_info = manifest["molecules"][mol_idx]
 
-        # Read waveform from memory-mapped file
+        # Read waveform from memory-mapped file.
         byte_offset, num_samples = self.offsets_arrays[dir_idx][mol_idx]
         sample_offset = int(byte_offset) // 2  # int16 = 2 bytes per sample
         waveform = np.array(
@@ -91,53 +96,62 @@ class CachedMoleculeDataset(Dataset):
             dtype=np.float32,
         )
 
-        # Normalize by level-1 amplitude
+        # Normalize by level-1 amplitude.
         amp_scale = mol_info["amplitude_scale"]  # uV per LSB
         mean_lvl1_uv = mol_info["mean_lvl1"] * 1000  # mV -> uV
         if mean_lvl1_uv > 0:
             waveform = (waveform * amp_scale) / mean_lvl1_uv
 
-        # Load GT and conditioning
+        # Load GT (new schema) and conditioning.
         gt = self.gt_lists[dir_idx][mol_idx]
         conditioning = self.conditioning_arrays[dir_idx][mol_idx].copy()
 
-        # Build heatmap target
-        probe_centers = gt["probe_sample_indices"]
-        velocities = gt["velocity_targets_bp_per_ms"]
-        durations_ms = TAG_WIDTH_BP / np.clip(velocities, 1e-6, None)
-        durations_samples = durations_ms / SAMPLE_PERIOD_MS
+        reference_bp_positions = np.asarray(
+            gt["reference_bp_positions"], dtype=np.int64
+        ).copy()
+        n_ref_probes = int(gt["n_ref_probes"])
 
-        heatmap = build_probe_heatmap(num_samples, probe_centers, durations_samples)
+        warmstart_centers = gt.get("warmstart_probe_centers_samples")
+        warmstart_durations = gt.get("warmstart_probe_durations_samples")
 
-        # Apply augmentations if enabled
+        # Build warmstart heatmap in-memory when the cached arrays are
+        # present; otherwise this molecule contributes no warmstart signal.
+        if warmstart_centers is not None and warmstart_durations is not None:
+            warmstart_np = build_probe_heatmap(
+                int(num_samples), warmstart_centers, warmstart_durations
+            )
+        else:
+            warmstart_np = None
+
+        # Apply augmentations if enabled. Only time_stretch affects the
+        # sample-space tensors; noise / amplitude only touch the waveform.
         if self.augment:
             from mongoose.data.augment import add_noise, scale_amplitude, time_stretch
 
             rng = np.random.default_rng()
-            # Time stretch
             stretch_factor = rng.uniform(0.9, 1.1)
             waveform = time_stretch(waveform, stretch_factor)
-            heatmap = time_stretch(heatmap, stretch_factor)
-            probe_centers = (probe_centers * stretch_factor).astype(np.int64)
+            if warmstart_np is not None:
+                warmstart_np = time_stretch(warmstart_np, stretch_factor)
             num_samples = len(waveform)
 
-            # Noise
             waveform = add_noise(waveform, rms_scale=0.02, rng=rng)
-            # Amplitude scale
             waveform = scale_amplitude(waveform, rng.uniform(0.95, 1.05))
 
-        # Convert velocity targets from bp/ms to bp/sample
-        velocity_targets_bp_per_sample = gt["velocity_targets_bp_per_ms"] * SAMPLE_PERIOD_MS
+        if warmstart_np is not None:
+            warmstart_heatmap: torch.Tensor | None = torch.from_numpy(warmstart_np)
+            warmstart_valid = True
+        else:
+            warmstart_heatmap = None
+            warmstart_valid = False
 
         return {
             "waveform": torch.from_numpy(waveform).unsqueeze(0),  # [1, T]
             "conditioning": torch.from_numpy(conditioning),  # [6]
-            "probe_heatmap": torch.from_numpy(heatmap),  # [T]
-            "probe_sample_indices": torch.from_numpy(gt["probe_sample_indices"].copy()),
-            "gt_deltas_bp": torch.from_numpy(gt["inter_probe_deltas_bp"].astype(np.float32).copy()),
-            "velocity_targets": torch.from_numpy(
-                velocity_targets_bp_per_sample.astype(np.float32).copy()
-            ),
-            "mask": torch.ones(num_samples, dtype=torch.bool),
+            "mask": torch.ones(int(num_samples), dtype=torch.bool),  # [T]
+            "reference_bp_positions": torch.from_numpy(reference_bp_positions),  # [N]
+            "n_ref_probes": torch.tensor(n_ref_probes, dtype=torch.long),
+            "warmstart_heatmap": warmstart_heatmap,  # [T] or None
+            "warmstart_valid": torch.tensor(warmstart_valid, dtype=torch.bool),
             "molecule_uid": mol_info["uid"],
         }

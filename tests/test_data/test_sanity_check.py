@@ -41,18 +41,26 @@ def _build_minimal_cache(cache_dir: Path, num_molecules: int = 3):
     conditioning = np.random.default_rng(42).normal(size=(num_molecules, 6)).astype(np.float32)
     np.save(cache_dir / "conditioning.npy", conditioning)
 
-    # Ground truth (must have probe_sample_indices in ascending order)
+    # Ground truth (V1 rearchitecture schema).
     gt_list = []
     for i, length in enumerate(lengths):
         num_probes = 4
-        indices = np.linspace(10, length - 10, num_probes, dtype=np.int64)
-        ref_bp = np.array([1000 + j * 1000 for j in range(num_probes)], dtype=np.int64)
+        direction = 1 if i % 2 == 0 else -1
+        base_positions = np.array(
+            [1000 + j * 1000 for j in range(num_probes)], dtype=np.int64
+        )
+        # Monotonic per direction: ascending for forward, descending for reverse.
+        ref_bp = base_positions if direction == 1 else base_positions[::-1].copy()
+
+        centers = np.linspace(10, length - 10, num_probes, dtype=np.int64)
+        durations = np.full(num_probes, 12.0, dtype=np.float32)
+
         gt_list.append({
-            "probe_sample_indices": indices,
-            "inter_probe_deltas_bp": np.abs(np.diff(ref_bp)).astype(np.float64),
-            "velocity_targets_bp_per_ms": np.array([400.0, 380.0, 360.0, 340.0]),
-            "reference_probe_bp": ref_bp,
-            "direction": 1 if i % 2 == 0 else -1,
+            "reference_bp_positions": ref_bp,
+            "n_ref_probes": num_probes,
+            "direction": direction,
+            "warmstart_probe_centers_samples": centers,
+            "warmstart_probe_durations_samples": durations,
         })
 
     with open(cache_dir / "molecules.pkl", "wb") as f:
@@ -75,6 +83,7 @@ def _build_minimal_cache(cache_dir: Path, num_molecules: int = 3):
                 "channel": 2,
                 "num_samples": length,
                 "num_probes": 4,
+                "n_ref_probes": 4,
                 "num_matched_probes": 4,
                 "transloc_time_ms": length * 0.025,
                 "mean_lvl1": 0.5 + i * 0.1,

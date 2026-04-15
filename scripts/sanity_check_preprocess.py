@@ -172,37 +172,51 @@ def check_data_integrity(cache_dir: Path) -> list[CheckResult]:
         )
     )
 
-    # Spot-check first few GT entries
+    # Spot-check first few GT entries (V1 rearchitecture schema).
     for i in range(min(3, n)):
         gt = gt_list[i]
+        ref_bp = np.asarray(gt["reference_bp_positions"])
+        direction = int(gt["direction"])
+        n_ref = int(gt["n_ref_probes"])
+
         results.append(
             CheckResult(
-                f"GT[{i}] probe indices sorted ascending",
-                bool(np.all(np.diff(gt["probe_sample_indices"]) > 0)),
-                f"num_probes={len(gt['probe_sample_indices'])}",
+                f"GT[{i}] n_ref_probes matches reference_bp_positions length",
+                n_ref == len(ref_bp),
+                f"n_ref={n_ref}, len={len(ref_bp)}",
             )
         )
+        # For direction=1, temporal order == ascending bp; for direction=-1
+        # it's descending. Either way, monotonicity is required.
+        if direction == 1:
+            monotonic = bool(len(ref_bp) <= 1 or np.all(np.diff(ref_bp) > 0))
+        else:
+            monotonic = bool(len(ref_bp) <= 1 or np.all(np.diff(ref_bp) < 0))
         results.append(
             CheckResult(
-                f"GT[{i}] deltas are all positive",
-                bool(np.all(gt["inter_probe_deltas_bp"] > 0)),
-                f"min_delta={gt['inter_probe_deltas_bp'].min() if len(gt['inter_probe_deltas_bp']) > 0 else 'n/a'}",
+                f"GT[{i}] reference_bp_positions monotonic (dir={direction})",
+                monotonic,
+                f"n_ref={n_ref}",
             )
         )
-        results.append(
-            CheckResult(
-                f"GT[{i}] deltas count = probes count - 1",
-                len(gt["inter_probe_deltas_bp"]) == len(gt["probe_sample_indices"]) - 1,
-                "",
+
+        centers = gt.get("warmstart_probe_centers_samples")
+        durations = gt.get("warmstart_probe_durations_samples")
+        if centers is not None and durations is not None:
+            results.append(
+                CheckResult(
+                    f"GT[{i}] warmstart arrays same length",
+                    len(centers) == len(durations),
+                    f"centers={len(centers)}, durations={len(durations)}",
+                )
             )
-        )
-        results.append(
-            CheckResult(
-                f"GT[{i}] velocity targets all positive",
-                bool(np.all(gt["velocity_targets_bp_per_ms"] > 0)),
-                f"min_vel={gt['velocity_targets_bp_per_ms'].min():.2f}",
+            results.append(
+                CheckResult(
+                    f"GT[{i}] warmstart durations positive",
+                    bool(np.all(np.asarray(durations) > 0)),
+                    "",
+                )
             )
-        )
 
     # Check waveform byte offsets don't overlap
     waveforms_bin_size = (cache_dir / "waveforms.bin").stat().st_size
@@ -247,13 +261,6 @@ def check_dataset_loads(cache_dir: Path) -> list[CheckResult]:
             )
             results.append(
                 CheckResult(
-                    f"Item[{i}] heatmap shape is (T,)",
-                    item["probe_heatmap"].shape == (T,),
-                    "",
-                )
-            )
-            results.append(
-                CheckResult(
                     f"Item[{i}] mask shape is (T,)",
                     item["mask"].shape == (T,),
                     "",
@@ -268,16 +275,6 @@ def check_dataset_loads(cache_dir: Path) -> list[CheckResult]:
             )
             results.append(
                 CheckResult(
-                    f"Item[{i}] heatmap values in [0, 1]",
-                    bool(
-                        torch.all(item["probe_heatmap"] >= 0)
-                        and torch.all(item["probe_heatmap"] <= 1.0 + 1e-6)
-                    ),
-                    f"max={item['probe_heatmap'].max().item():.3f}",
-                )
-            )
-            results.append(
-                CheckResult(
                     f"Item[{i}] waveform values are finite",
                     bool(torch.all(torch.isfinite(item["waveform"]))),
                     "",
@@ -285,12 +282,30 @@ def check_dataset_loads(cache_dir: Path) -> list[CheckResult]:
             )
             results.append(
                 CheckResult(
-                    f"Item[{i}] gt_deltas are positive",
-                    len(item["gt_deltas_bp"]) == 0
-                    or bool(torch.all(item["gt_deltas_bp"] > 0)),
-                    f"num_deltas={len(item['gt_deltas_bp'])}",
+                    f"Item[{i}] reference_bp_positions length matches n_ref_probes",
+                    item["reference_bp_positions"].numel()
+                    == int(item["n_ref_probes"].item()),
+                    f"len={item['reference_bp_positions'].numel()}, n_ref={int(item['n_ref_probes'].item())}",
                 )
             )
+            if item["warmstart_heatmap"] is not None:
+                results.append(
+                    CheckResult(
+                        f"Item[{i}] warmstart_heatmap shape is (T,)",
+                        item["warmstart_heatmap"].shape == (T,),
+                        "",
+                    )
+                )
+                results.append(
+                    CheckResult(
+                        f"Item[{i}] warmstart_heatmap values in [0, 1]",
+                        bool(
+                            torch.all(item["warmstart_heatmap"] >= 0)
+                            and torch.all(item["warmstart_heatmap"] <= 1.0 + 1e-6)
+                        ),
+                        f"max={item['warmstart_heatmap'].max().item():.3f}",
+                    )
+                )
         except Exception as e:
             results.append(CheckResult(f"Item[{i}] loads", False, str(e)))
 

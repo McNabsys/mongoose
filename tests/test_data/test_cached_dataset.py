@@ -1,4 +1,8 @@
-"""Tests for CachedMoleculeDataset that reads from preprocessed cache directories."""
+"""Tests for CachedMoleculeDataset that reads from preprocessed cache directories.
+
+V1 rearchitecture (R6): molecules.pkl now uses the new schema
+(reference_bp_positions, n_ref_probes, direction, optional warmstart_*).
+"""
 
 import json
 import pickle
@@ -10,9 +14,19 @@ import torch
 from mongoose.data.cached_dataset import CachedMoleculeDataset
 
 
+def _write_manifest(cache_dir, molecules):
+    manifest = {
+        "run_id": cache_dir.name,
+        "stats": {"cached_molecules": len(molecules)},
+        "molecules": molecules,
+    }
+    with open(cache_dir / "manifest.json", "w") as f:
+        json.dump(manifest, f)
+
+
 @pytest.fixture
 def fake_cache_dir(tmp_path):
-    """Create a fake cache directory with 2 molecules for testing."""
+    """Create a fake cache directory with 2 molecules in the new GT schema."""
     cache_dir = tmp_path / "test_run"
     cache_dir.mkdir()
 
@@ -23,7 +37,6 @@ def fake_cache_dir(tmp_path):
         f.write(wfm1.tobytes())
         f.write(wfm2.tobytes())
 
-    # offsets: (byte_offset_into_waveforms_bin, num_samples)
     offsets = np.array([[0, 100], [200, 200]], dtype=np.int64)
     np.save(cache_dir / "offsets.npy", offsets)
 
@@ -33,38 +46,39 @@ def fake_cache_dir(tmp_path):
     )
     np.save(cache_dir / "conditioning.npy", conditioning)
 
+    # Molecule 0: has warmstart labels. Molecule 1: no warmstart (None).
     gt_list = [
         {
-            "probe_sample_indices": np.array([20, 50, 80], dtype=np.int64),
-            "inter_probe_deltas_bp": np.array([1000.0, 2000.0], dtype=np.float64),
-            "velocity_targets_bp_per_ms": np.array(
-                [400.0, 350.0, 300.0], dtype=np.float64
-            ),
-            "reference_probe_bp": np.array([1000, 2000, 4000], dtype=np.int64),
+            "reference_bp_positions": np.array([1000, 2000, 4000], dtype=np.int64),
+            "n_ref_probes": 3,
             "direction": 1,
+            "warmstart_probe_centers_samples": np.array(
+                [20, 50, 80], dtype=np.int64
+            ),
+            "warmstart_probe_durations_samples": np.array(
+                [10.0, 12.0, 14.0], dtype=np.float32
+            ),
         },
         {
-            "probe_sample_indices": np.array([30, 100, 170], dtype=np.int64),
-            "inter_probe_deltas_bp": np.array([1500.0, 2500.0], dtype=np.float64),
-            "velocity_targets_bp_per_ms": np.array(
-                [380.0, 340.0, 290.0], dtype=np.float64
-            ),
-            "reference_probe_bp": np.array([500, 2000, 4500], dtype=np.int64),
+            "reference_bp_positions": np.array([4500, 2000, 500], dtype=np.int64),
+            "n_ref_probes": 3,
             "direction": -1,
+            "warmstart_probe_centers_samples": None,
+            "warmstart_probe_durations_samples": None,
         },
     ]
     with open(cache_dir / "molecules.pkl", "wb") as f:
         pickle.dump(gt_list, f)
 
-    manifest = {
-        "run_id": "test_run",
-        "stats": {"cached_molecules": 2},
-        "molecules": [
+    _write_manifest(
+        cache_dir,
+        [
             {
                 "uid": 0,
                 "channel": 2,
                 "num_samples": 100,
                 "num_probes": 3,
+                "n_ref_probes": 3,
                 "num_matched_probes": 3,
                 "transloc_time_ms": 2.5,
                 "mean_lvl1": 0.5,
@@ -76,48 +90,61 @@ def fake_cache_dir(tmp_path):
                 "channel": 3,
                 "num_samples": 200,
                 "num_probes": 3,
-                "num_matched_probes": 3,
+                "n_ref_probes": 3,
+                "num_matched_probes": 0,
                 "transloc_time_ms": 5.0,
                 "mean_lvl1": 0.6,
                 "direction": -1,
                 "amplitude_scale": 1.0,
             },
         ],
-    }
-    with open(cache_dir / "manifest.json", "w") as f:
-        json.dump(manifest, f)
+    )
 
     return cache_dir
 
 
 def test_cached_dataset_loads(fake_cache_dir):
-    """Verify the dataset loads all molecules from cache."""
     ds = CachedMoleculeDataset([fake_cache_dir])
     assert len(ds) == 2
 
 
 def test_cached_dataset_item_shapes(fake_cache_dir):
-    """Verify shapes of tensors returned by __getitem__."""
+    """Verify shapes of tensors returned by __getitem__ (new schema)."""
     ds = CachedMoleculeDataset([fake_cache_dir])
     item = ds[0]
 
     assert item["waveform"].shape == (1, 100)
-    assert item["probe_heatmap"].shape == (100,)
     assert item["mask"].shape == (100,)
     assert item["conditioning"].shape == (6,)
-    assert len(item["probe_sample_indices"]) == 3
-    assert len(item["gt_deltas_bp"]) == 2
-    assert len(item["velocity_targets"]) == 3
+    assert item["reference_bp_positions"].shape == (3,)
+    assert item["reference_bp_positions"].dtype == torch.long
+    assert item["n_ref_probes"].dtype == torch.long
+    assert int(item["n_ref_probes"].item()) == 3
 
 
 def test_cached_dataset_second_molecule(fake_cache_dir):
-    """Verify the second molecule has correct shape (different length)."""
+    """Second molecule has no warmstart; schema fields reflect that."""
     ds = CachedMoleculeDataset([fake_cache_dir])
     item = ds[1]
 
     assert item["waveform"].shape == (1, 200)
-    assert item["probe_heatmap"].shape == (200,)
     assert item["mask"].shape == (200,)
+    assert item["warmstart_heatmap"] is None
+    assert not bool(item["warmstart_valid"].item())
+
+
+def test_cached_dataset_warmstart_heatmap_built(fake_cache_dir):
+    """When warmstart arrays are cached, a [T] float heatmap is built."""
+    ds = CachedMoleculeDataset([fake_cache_dir])
+    item = ds[0]
+
+    assert item["warmstart_heatmap"] is not None
+    assert item["warmstart_heatmap"].shape == (100,)
+    assert item["warmstart_heatmap"].dtype == torch.float32
+    # Peaks should be in [0, 1] since build_probe_heatmap uses max-blend.
+    assert float(item["warmstart_heatmap"].max().item()) <= 1.0 + 1e-6
+    assert float(item["warmstart_heatmap"].max().item()) > 0.5  # has a real peak
+    assert bool(item["warmstart_valid"].item())
 
 
 def test_cached_dataset_waveform_values(fake_cache_dir):
@@ -127,19 +154,16 @@ def test_cached_dataset_waveform_values(fake_cache_dir):
 
     # wfm1 = 500 (int16), amplitude_scale=1.0, mean_lvl1=0.5 mV = 500 uV
     # normalized = (500 * 1.0) / 500.0 = 1.0 for all samples
-    expected = 1.0
-    np.testing.assert_allclose(item["waveform"].numpy(), expected, rtol=1e-5)
+    np.testing.assert_allclose(item["waveform"].numpy(), 1.0, rtol=1e-5)
 
 
 def test_cached_dataset_molecule_uid(fake_cache_dir):
-    """Verify molecule_uid is populated correctly."""
     ds = CachedMoleculeDataset([fake_cache_dir])
     assert ds[0]["molecule_uid"] == 0
     assert ds[1]["molecule_uid"] == 1
 
 
 def test_cached_dataset_tensor_types(fake_cache_dir):
-    """Verify all outputs are tensors of expected dtypes."""
     ds = CachedMoleculeDataset([fake_cache_dir])
     item = ds[0]
 
@@ -147,15 +171,15 @@ def test_cached_dataset_tensor_types(fake_cache_dir):
     assert item["waveform"].dtype == torch.float32
     assert isinstance(item["conditioning"], torch.Tensor)
     assert item["conditioning"].dtype == torch.float32
-    assert isinstance(item["probe_heatmap"], torch.Tensor)
-    assert item["probe_heatmap"].dtype == torch.float32
     assert isinstance(item["mask"], torch.Tensor)
     assert item["mask"].dtype == torch.bool
+    assert isinstance(item["reference_bp_positions"], torch.Tensor)
+    assert isinstance(item["warmstart_valid"], torch.Tensor)
+    assert item["warmstart_valid"].dtype == torch.bool
 
 
 def test_cached_dataset_multiple_dirs(fake_cache_dir, tmp_path):
     """Verify dataset can merge multiple cache directories."""
-    # Create a second cache dir with 1 molecule
     cache_dir2 = tmp_path / "test_run_2"
     cache_dir2.mkdir()
 
@@ -171,27 +195,29 @@ def test_cached_dataset_multiple_dirs(fake_cache_dir, tmp_path):
 
     gt_list = [
         {
-            "probe_sample_indices": np.array([30, 75, 120], dtype=np.int64),
-            "inter_probe_deltas_bp": np.array([1200.0, 1800.0], dtype=np.float64),
-            "velocity_targets_bp_per_ms": np.array(
-                [350.0, 320.0, 280.0], dtype=np.float64
-            ),
-            "reference_probe_bp": np.array([800, 2000, 3800], dtype=np.int64),
+            "reference_bp_positions": np.array([800, 2000, 3800], dtype=np.int64),
+            "n_ref_probes": 3,
             "direction": 1,
+            "warmstart_probe_centers_samples": np.array(
+                [30, 75, 120], dtype=np.int64
+            ),
+            "warmstart_probe_durations_samples": np.array(
+                [11.0, 13.0, 15.0], dtype=np.float32
+            ),
         },
     ]
     with open(cache_dir2 / "molecules.pkl", "wb") as f:
         pickle.dump(gt_list, f)
 
-    manifest = {
-        "run_id": "test_run_2",
-        "stats": {"cached_molecules": 1},
-        "molecules": [
+    _write_manifest(
+        cache_dir2,
+        [
             {
                 "uid": 10,
                 "channel": 1,
                 "num_samples": 150,
                 "num_probes": 3,
+                "n_ref_probes": 3,
                 "num_matched_probes": 3,
                 "transloc_time_ms": 3.75,
                 "mean_lvl1": 0.4,
@@ -199,9 +225,7 @@ def test_cached_dataset_multiple_dirs(fake_cache_dir, tmp_path):
                 "amplitude_scale": 1.0,
             },
         ],
-    }
-    with open(cache_dir2 / "manifest.json", "w") as f:
-        json.dump(manifest, f)
+    )
 
     ds = CachedMoleculeDataset([fake_cache_dir, cache_dir2])
     assert len(ds) == 3
@@ -209,19 +233,7 @@ def test_cached_dataset_multiple_dirs(fake_cache_dir, tmp_path):
     item = ds[2]
     assert item["waveform"].shape == (1, 150)
     assert item["molecule_uid"] == 10
-
-
-def test_cached_dataset_velocity_units(fake_cache_dir):
-    """Verify velocity targets are converted from bp/ms to bp/sample."""
-    ds = CachedMoleculeDataset([fake_cache_dir])
-    item = ds[0]
-
-    # Original: [400, 350, 300] bp/ms
-    # Convert: * 0.025 ms/sample = [10.0, 8.75, 7.5] bp/sample
-    expected = np.array([400.0, 350.0, 300.0]) * 0.025
-    np.testing.assert_allclose(
-        item["velocity_targets"].numpy(), expected, rtol=1e-5
-    )
+    assert int(item["n_ref_probes"].item()) == 3
 
 
 def test_cached_dataset_mask_all_true(fake_cache_dir):
@@ -248,13 +260,7 @@ def test_cached_dataset_empty_dir(tmp_path):
     with open(cache_dir / "molecules.pkl", "wb") as f:
         pickle.dump([], f)
 
-    manifest = {
-        "run_id": "empty_run",
-        "stats": {"cached_molecules": 0},
-        "molecules": [],
-    }
-    with open(cache_dir / "manifest.json", "w") as f:
-        json.dump(manifest, f)
+    _write_manifest(cache_dir, [])
 
     ds = CachedMoleculeDataset([cache_dir])
     assert len(ds) == 0
