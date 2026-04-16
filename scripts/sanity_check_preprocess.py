@@ -323,7 +323,7 @@ def summary_statistics(cache_dir: Path) -> None:
         return
 
     transloc_times = np.array([m["transloc_time_ms"] for m in mols])
-    lvl1s = np.array([m["mean_lvl1"] for m in mols])
+    lvl1s = np.array([m["mean_lvl1_from_tdb"] for m in mols])
     num_samples = np.array([m["num_samples"] for m in mols])
     num_probes = np.array([m["num_probes"] for m in mols])
     num_matched = np.array([m["num_matched_probes"] for m in mols])
