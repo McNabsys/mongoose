@@ -16,7 +16,7 @@ import re
 from pathlib import Path, PureWindowsPath
 
 
-_LINE_RE = re.compile(r"^(\d{6})(.+)$")
+_LINE_RE = re.compile(r"^(\d{6})(\D.+)$")
 
 
 def parse_probes_bin_files(path: str | Path) -> list[str]:
@@ -43,7 +43,7 @@ def parse_probes_bin_files(path: str | Path) -> list[str]:
     for ln in lines:
         m = _LINE_RE.match(ln)
         if not m:
-            continue
+            raise ValueError(f"{path.name}: malformed line: {ln!r}")
         idx = int(m.group(1))
         tdb_path = m.group(2)
         basename = PureWindowsPath(tdb_path).name

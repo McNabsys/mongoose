@@ -88,3 +88,32 @@ def test_parse_raises_on_missing_index(tmp_path):
 
     with pytest.raises(ValueError, match="missing index 1"):
         parse_probes_bin_files(p)
+
+
+def test_parse_raises_on_malformed_line(tmp_path):
+    """Non-blank lines that don't match the index+path format must raise,
+    not be silently dropped (dropping could produce a too-short list that
+    passes the gap check but misaddresses downstream TDBs)."""
+    from mongoose.io.probes_bin_files import parse_probes_bin_files
+
+    p = tmp_path / "run_probes.bin.files"
+    # Second line has no 6-digit prefix
+    p.write_bytes(
+        b"000000D:\\a\\first.tdb\r\n"
+        b"garbageD:\\b\\broken.tdb\r\n"
+    )
+
+    with pytest.raises(ValueError, match="malformed"):
+        parse_probes_bin_files(p)
+
+
+def test_parse_raises_on_too_many_leading_digits(tmp_path):
+    """A 7-digit index would ambiguously break the 6-digit contract.
+    Must raise rather than silently truncating."""
+    from mongoose.io.probes_bin_files import parse_probes_bin_files
+
+    p = tmp_path / "run_probes.bin.files"
+    p.write_bytes(b"0000001D:\\a\\first.tdb\r\n")
+
+    with pytest.raises(ValueError, match="malformed"):
+        parse_probes_bin_files(p)
