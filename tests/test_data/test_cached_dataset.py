@@ -81,7 +81,7 @@ def fake_cache_dir(tmp_path):
                 "n_ref_probes": 3,
                 "num_matched_probes": 3,
                 "transloc_time_ms": 2.5,
-                "mean_lvl1": 0.5,
+                "mean_lvl1_from_tdb": 0.5,
                 "direction": 1,
                 "amplitude_scale": 1.0,
             },
@@ -93,7 +93,7 @@ def fake_cache_dir(tmp_path):
                 "n_ref_probes": 3,
                 "num_matched_probes": 0,
                 "transloc_time_ms": 5.0,
-                "mean_lvl1": 0.6,
+                "mean_lvl1_from_tdb": 0.6,
                 "direction": -1,
                 "amplitude_scale": 1.0,
             },
@@ -152,7 +152,7 @@ def test_cached_dataset_waveform_values(fake_cache_dir):
     ds = CachedMoleculeDataset([fake_cache_dir])
     item = ds[0]
 
-    # wfm1 = 500 (int16), amplitude_scale=1.0, mean_lvl1=0.5 mV = 500 uV
+    # wfm1 = 500 (int16), amplitude_scale=1.0, mean_lvl1_from_tdb=0.5 mV = 500 uV
     # normalized = (500 * 1.0) / 500.0 = 1.0 for all samples
     np.testing.assert_allclose(item["waveform"].numpy(), 1.0, rtol=1e-5)
 
@@ -220,7 +220,7 @@ def test_cached_dataset_multiple_dirs(fake_cache_dir, tmp_path):
                 "n_ref_probes": 3,
                 "num_matched_probes": 3,
                 "transloc_time_ms": 3.75,
-                "mean_lvl1": 0.4,
+                "mean_lvl1_from_tdb": 0.4,
                 "direction": 1,
                 "amplitude_scale": 1.0,
             },

@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+import struct
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -37,7 +38,7 @@ from mongoose.data.level1 import estimate_level1
 from mongoose.io.assigns import load_assigns
 from mongoose.io.probes_bin import load_probes_bin
 from mongoose.io.reference_map import load_reference_map
-from mongoose.io.tdb import load_tdb_header, load_tdb_molecule
+from mongoose.io.tdb import load_tdb_header, load_tdb_index, load_tdb_molecule_at_offset
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,8 @@ class PreprocessStats:
 
 def preprocess_run(
     run_id: str,
-    tdb_path: Path,
+    tdb_paths: list[Path],
+    tdb_index_paths: list[Path],
     probes_bin_path: Path,
     assigns_path: Path,
     reference_map_path: Path,
@@ -64,50 +66,64 @@ def preprocess_run(
     min_probes: int = 8,
     min_transloc_ms: float = 30.0,
 ) -> PreprocessStats:
-    """Preprocess one run into compact training cache.
+    """Preprocess one run into a compact training cache.
 
-    Reads a run's TDB file, probes.bin, assigns, and reference map.
-    Filters to clean, remapped molecules with enough probes.
-    Writes a compact cache directory:
-        <output_dir>/<run_id>/
-            manifest.json
-            waveforms.bin
-            offsets.npy
-            conditioning.npy
-            molecules.pkl
+    Supports runs composed of one or more TDB files. Each probes.bin molecule
+    carries a `file_name_index` selecting which TDB it came from, plus
+    `(channel, molecule_id)` that identifies its block in that TDB's index
+    (molecule_id is the TDB's per-channel sequential MID).
 
     Args:
         run_id: Identifier for this run.
-        tdb_path: Path to the .tdb file.
+        tdb_paths: TDB files indexed by `file_name_index`
+            (as resolved from probes.bin.files).
+        tdb_index_paths: Parallel list of .tdb_index sidecar paths.
         probes_bin_path: Path to the _probes.bin file.
         assigns_path: Path to the _probeassignment.assigns file.
         reference_map_path: Path to the _referenceMap.txt file.
         output_dir: Where to write the cache directory.
-        min_probes: Minimum number of probes required per molecule.
+        min_probes: Minimum number of probes per molecule.
         min_transloc_ms: Minimum translocation time in milliseconds.
 
     Returns:
         PreprocessStats with counts from this run.
     """
+    if len(tdb_paths) != len(tdb_index_paths):
+        raise ValueError(
+            f"tdb_paths ({len(tdb_paths)}) and tdb_index_paths "
+            f"({len(tdb_index_paths)}) must be parallel"
+        )
+
     output_dir = output_dir / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load all metadata
-    tdb_header = load_tdb_header(tdb_path)
+    # Load per-TDB metadata once.
+    tdb_headers = [load_tdb_header(p) for p in tdb_paths]
+    tdb_indexes = [load_tdb_index(p) for p in tdb_index_paths]
+
+    # Merge channel -> amplitude_scale across all TDBs. In practice all TDBs
+    # in one run share the same amplitude_scale per channel; if they disagree
+    # we accept the first TDB's value and log.
+    channel_to_scale: dict[int, float] = {}
+    for hdr in tdb_headers:
+        for ch_id, scale in zip(hdr.channel_ids, hdr.amplitude_scale_factors):
+            if ch_id in channel_to_scale and channel_to_scale[ch_id] != scale:
+                logger.warning(
+                    "Channel %d amplitude_scale disagreement across TDBs: "
+                    "%g vs %g; keeping first",
+                    ch_id, channel_to_scale[ch_id], scale,
+                )
+                continue
+            channel_to_scale[ch_id] = scale
+
     probes_file = load_probes_bin(probes_bin_path)
     assigns = load_assigns(assigns_path)
     ref = load_reference_map(reference_map_path)
 
-    # Build channel -> amplitude scale factor mapping
-    channel_to_scale: dict[int, float] = {}
-    for ch_id, scale in zip(tdb_header.channel_ids, tdb_header.amplitude_scale_factors):
-        channel_to_scale[ch_id] = scale
-
     manifest_entries: list[dict] = []
-    offsets: list[tuple[int, int]] = []  # (byte_offset, num_samples)
+    offsets: list[tuple[int, int]] = []
     conditioning_rows: list[np.ndarray] = []
     gt_list: list[dict] = []
-
     current_offset = 0
 
     stats = PreprocessStats(
@@ -119,18 +135,16 @@ def preprocess_run(
         total_waveform_bytes=0,
     )
 
+    skipped_identity = 0
     waveform_file = open(output_dir / "waveforms.bin", "wb")
-
     try:
-        for mol_idx, mol in enumerate(probes_file.molecules):
-            # Quality filter
+        for mol in probes_file.molecules:
             if mol.structured or mol.folded_start or mol.folded_end or mol.do_not_use:
                 continue
             if mol.num_probes < min_probes or mol.transloc_time_ms < min_transloc_ms:
                 continue
             stats.clean_molecules += 1
 
-            # Check if mapped
             if mol.uid >= len(assigns):
                 continue
             assign = assigns[mol.uid]
@@ -138,7 +152,6 @@ def preprocess_run(
                 continue
             stats.remapped_molecules += 1
 
-            # Build ground truth (new V1 schema)
             gt = build_molecule_gt(
                 mol,
                 assign,
@@ -149,40 +162,55 @@ def preprocess_run(
             if gt is None:
                 continue
 
-            # Load waveform from TDB
-            try:
-                tdb_mol = load_tdb_molecule(tdb_path, tdb_header, mol_idx)
-            except Exception:
-                logger.warning("Failed to load TDB molecule %d, skipping", mol_idx)
+            # Route to the correct TDB via file_name_index + (channel, MID).
+            fni = int(mol.file_name_index)
+            if fni < 0 or fni >= len(tdb_paths):
+                logger.warning(
+                    "Molecule uid=%d has file_name_index=%d, out of range for "
+                    "%d TDBs - skipping",
+                    mol.uid, fni, len(tdb_paths),
+                )
+                skipped_identity += 1
                 continue
 
-            waveform = tdb_mol.waveform  # int16
+            key = (int(mol.channel), int(mol.molecule_id))
+            offset = tdb_indexes[fni].get(key)
+            if offset is None:
+                logger.warning(
+                    "Molecule uid=%d (ch=%d, mid=%d) not found in TDB %s index "
+                    "- skipping",
+                    mol.uid, key[0], key[1], tdb_paths[fni].name,
+                )
+                skipped_identity += 1
+                continue
+
+            try:
+                tdb_mol = load_tdb_molecule_at_offset(tdb_paths[fni], offset)
+            except (OSError, struct.error, ValueError):
+                logger.warning(
+                    "Failed to read TDB molecule at %s offset %d - skipping",
+                    tdb_paths[fni].name, offset,
+                    exc_info=True,
+                )
+                skipped_identity += 1
+                continue
+
+            waveform = tdb_mol.waveform
             num_samples = len(waveform)
 
-            # Compute mean level-1 backbone directly from the raw waveform
-            # using the TDB rise/fall edges. This replaces the wfmproc
-            # ``mol.mean_lvl1`` as the conditioning-vector baseline proxy.
             mean_lvl1_from_tdb = estimate_level1(
                 waveform,
                 rise_end_idx=int(tdb_mol.rise_conv_end_index),
                 fall_min_idx=int(tdb_mol.fall_conv_min_index),
             )
 
-            # Write waveform
             waveform_bytes = waveform.tobytes()
             waveform_file.write(waveform_bytes)
             offsets.append((current_offset, num_samples))
             current_offset += len(waveform_bytes)
 
-            # Build conditioning vector [6]:
-            # 0: Absolute pre-event baseline (mean_lvl1_from_tdb, TDB-derived)
-            # 1: log(molecule duration in samples)
-            # 2: log(inter-event interval + 1) -- placeholder
-            # 3: Time-in-run (fraction)
-            # 4: Applied bias voltage (placeholder)
-            # 5: Applied pressure (placeholder)
             duration_samples = num_samples
-            inter_event_ms = 0.0  # placeholder
+            inter_event_ms = 0.0
             time_in_run_frac = (
                 mol.start_ms / (probes_file.last_sample_time * 1000)
                 if probes_file.last_sample_time > 0
@@ -202,7 +230,6 @@ def preprocess_run(
             )
             conditioning_rows.append(cond)
 
-            # Store GT as a plain dict with numpy arrays (new V1 schema).
             gt_dict = {
                 "reference_bp_positions": gt.reference_bp_positions,
                 "n_ref_probes": gt.n_ref_probes,
@@ -212,7 +239,6 @@ def preprocess_run(
             }
             gt_list.append(gt_dict)
 
-            # Manifest entry
             num_matched_probes = (
                 len(gt.warmstart_probe_centers_samples)
                 if gt.warmstart_probe_centers_samples is not None
@@ -222,6 +248,8 @@ def preprocess_run(
                 {
                     "uid": int(mol.uid),
                     "channel": int(mol.channel),
+                    "molecule_id": int(mol.molecule_id),
+                    "file_name_index": fni,
                     "num_samples": num_samples,
                     "num_probes": int(mol.num_probes),
                     "n_ref_probes": int(gt.n_ref_probes),
@@ -239,7 +267,12 @@ def preprocess_run(
 
     stats.total_waveform_bytes = current_offset
 
-    # Write remaining files
+    if skipped_identity > 0:
+        logger.warning(
+            "Preprocessing %s: skipped %d molecules due to TDB identity lookup failures",
+            run_id, skipped_identity,
+        )
+
     np.save(output_dir / "offsets.npy", np.array(offsets, dtype=np.int64))
     np.save(
         output_dir / "conditioning.npy",
@@ -252,6 +285,7 @@ def preprocess_run(
     manifest = {
         "run_id": run_id,
         "stats": asdict(stats),
+        "tdb_files": [p.name for p in tdb_paths],
         "molecules": manifest_entries,
     }
     with open(output_dir / "manifest.json", "w") as f:

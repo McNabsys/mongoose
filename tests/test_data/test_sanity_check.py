@@ -86,7 +86,7 @@ def _build_minimal_cache(cache_dir: Path, num_molecules: int = 3):
                 "n_ref_probes": 4,
                 "num_matched_probes": 4,
                 "transloc_time_ms": length * 0.025,
-                "mean_lvl1": 0.5 + i * 0.1,
+                "mean_lvl1_from_tdb": 0.5 + i * 0.1,
                 "direction": 1 if i % 2 == 0 else -1,
                 "amplitude_scale": 1.0,
             }

@@ -11,7 +11,7 @@ import numpy as np
 NABS_MAGIC = 0x5342414E
 FILE_TYPE_TDB = 71000
 FILE_TYPE_INDEX = 71001
-FILE_VERSION = 3
+FILE_VERSION = 4
 
 # Number of variable-length string fields in the header.
 _NUM_STRING_FIELDS = 23
@@ -158,6 +158,11 @@ def _read_molecule_block(f) -> TdbMolecule:
     # Molecule samples (int16)
     waveform = np.frombuffer(f.read(total_data_count * 2), dtype=np.int16).copy()
 
+    # Undocumented 4-byte field between waveform and MorphOpen data in
+    # real Nabsys v4 TDBs (not present in v4.6 spec Table 2). Appears to
+    # be a filter-output value; skipped because it is unused downstream.
+    f.read(4)
+
     # MorphOpen
     (morph_count,) = struct.unpack("<I", f.read(4))
     if morph_count > 0:
@@ -198,6 +203,8 @@ def _skip_molecule_block(f) -> None:
 
     # Skip waveform (int16)
     f.read(total_data_count * 2)
+
+    f.read(4)  # undocumented 4-byte field (see _read_molecule_block)
 
     # MorphOpen
     (morph_count,) = struct.unpack("<I", f.read(4))
@@ -248,6 +255,67 @@ def _get_molecule_offset_from_index(index_path: Path, molecule_index: int) -> in
 
         _channel, _uid, byte_offset = struct.unpack("<IIQ", data)
         return byte_offset
+
+
+def load_tdb_index(index_path: str | Path) -> dict[tuple[int, int], int]:
+    """Load a TDB index file into a (channel, MID) -> byte_offset dict.
+
+    Args:
+        index_path: Path to the _index file.
+
+    Returns:
+        Dict mapping (channel_source, MID) to the molecule's byte offset
+        in its TDB file. MID is the per-channel sequential molecule ID.
+    """
+    index_path = Path(index_path)
+    result: dict[tuple[int, int], int] = {}
+
+    with open(index_path, "rb") as f:
+        (magic,) = struct.unpack("<I", f.read(4))
+        assert magic == NABS_MAGIC, f"Bad index magic: {magic:#010x}"
+
+        (file_type,) = struct.unpack("<I", f.read(4))
+        assert file_type == FILE_TYPE_INDEX, f"Not an index file: {file_type}"
+
+        # Version: spec says "must match base file version" but separately
+        # documents the index as "File version 1". We don't enforce here;
+        # format of the record itself hasn't changed.
+        f.read(4)
+
+        # Records: (channel:uint32, mid:uint32, offset:uint64) = 16 bytes each.
+        while True:
+            data = f.read(16)
+            if len(data) == 0:
+                break
+            if len(data) < 16:
+                raise ValueError(
+                    f"Truncated index record at {f.tell() - len(data)}: "
+                    f"got {len(data)} bytes, expected 16"
+                )
+            channel, mid, offset = struct.unpack("<IIQ", data)
+            result[(channel, mid)] = offset
+
+    return result
+
+
+def load_tdb_molecule_at_offset(
+    path: str | Path,
+    byte_offset: int,
+) -> TdbMolecule:
+    """Load a single molecule block from a TDB file at a known byte offset.
+
+    Args:
+        path: Path to the .tdb file.
+        byte_offset: Absolute file offset where the molecule block starts
+            (from a loaded TDB index).
+
+    Returns:
+        A TdbMolecule with waveform data.
+    """
+    path = Path(path)
+    with open(path, "rb") as f:
+        f.seek(byte_offset)
+        return _read_molecule_block(f)
 
 
 def load_tdb_molecule(

@@ -98,7 +98,7 @@ class CachedMoleculeDataset(Dataset):
 
         # Normalize by level-1 amplitude.
         amp_scale = mol_info["amplitude_scale"]  # uV per LSB
-        mean_lvl1_uv = mol_info["mean_lvl1"] * 1000  # mV -> uV
+        mean_lvl1_uv = mol_info["mean_lvl1_from_tdb"] * 1000  # mV -> uV
         if mean_lvl1_uv > 0:
             waveform = (waveform * amp_scale) / mean_lvl1_uv
 
