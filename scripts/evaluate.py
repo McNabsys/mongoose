@@ -1,4 +1,39 @@
-"""Evaluate trained T2D U-Net against legacy model on held-out data."""
+"""Evaluate trained T2D U-Net against legacy model on held-out data.
+
+.. deprecated:: 2026-04-16
+
+    This script is out of date and will not run as-is. The V1 rearchitecture
+    (R4, 2026-04-15) removed fields that this script still references:
+
+    * ``MoleculeGT.inter_probe_deltas_bp`` -- removed; now derived at training
+      time from detected peaks (see ``src/mongoose/data/ground_truth.py``).
+    * ``MoleculeGT.reference_probe_bp`` -- replaced by
+      ``reference_bp_positions``.
+
+    The conditioning vector built by ``_build_conditioning`` also no longer
+    matches what the trainer writes. Training-time preprocess writes
+    ``[mean_lvl1_from_tdb, log(duration_samples), log(inter_event_ms+1),
+    time_in_run_frac, 0.0, 0.0]`` (see ``src/mongoose/data/preprocess.py``),
+    but this script still produces the pre-rearchitecture probes.bin-derived
+    vector.
+
+    Finally, this script uses a dummy all-zero waveform at lines ~185-188
+    rather than loading real TDB data, so even if the other mismatches were
+    fixed the inference results would be meaningless.
+
+    A rewrite should:
+
+    1. Consume a preprocessed cache directory via
+       ``mongoose.data.cached_dataset.CachedMoleculeDataset`` rather than
+       scanning probes.bin and building a dummy waveform.
+    2. Emit the same conditioning layout the trainer wrote (read it straight
+       from the cache; don't rebuild it).
+    3. Update the legacy-T2D comparison to use the new ``reference_bp_positions``
+       plus an on-the-fly ``diff()`` when inter-probe deltas are needed.
+
+    Until that rewrite lands, this script remains in-tree only as a design
+    reference for what end-to-end evaluation should look like. Do not invoke.
+"""
 
 from __future__ import annotations
 
@@ -46,8 +81,18 @@ def _format_metrics(name: str, metrics: EvalMetrics) -> str:
 def _build_conditioning(mol: Molecule) -> torch.Tensor:
     """Build the 6-element conditioning vector for a molecule.
 
-    Same as used in training: [transloc_time_ms, rise_t50, fall_t50,
-    mean_lvl1, num_probes, use_partial_time_ms].
+    .. deprecated:: 2026-04-16
+
+        This layout is WRONG for the current trainer. Training-time
+        preprocess (``src/mongoose/data/preprocess.py``) writes
+        ``[mean_lvl1_from_tdb, log(duration_samples), log(inter_event_ms+1),
+        time_in_run_frac, 0.0, 0.0]``. The vector below is the
+        pre-rearchitecture probes.bin-derived shape and would cause the
+        FiLM head to condition on totally different features than those the
+        trainer saw -- results would be silently meaningless.
+
+        The right replacement is to read the conditioning row straight out
+        of the preprocessed cache (``conditioning.npy``), not rebuild it.
     """
     return torch.tensor(
         [
