@@ -249,6 +249,7 @@ class Trainer:
     def _log(self, epoch: int, train_metrics: dict, val_metrics: dict) -> None:
         """Print epoch summary to stdout."""
         lr = self.optimizer.param_groups[0]["lr"]
+        blend = float(getattr(self.criterion, "_warmstart_blend", 0.0))
         msg = (
             f"Epoch {epoch + 1}/{self.config.epochs} | "
             f"loss={train_metrics['loss']:.4f} | "
@@ -257,6 +258,7 @@ class Trainer:
             f"vel={train_metrics['vel_loss']:.4f} | "
             f"count={train_metrics['count_loss']:.4f} | "
             f"val_loss={val_metrics['loss']:.4f} | "
+            f"blend={blend:.3f} | "
             f"lr={lr:.6f}"
         )
         print(msg)

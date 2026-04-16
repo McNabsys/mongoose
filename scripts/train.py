@@ -25,6 +25,24 @@ def main() -> None:
     parser.add_argument(
         "--save-every", type=int, default=5, help="Save checkpoint every N epochs"
     )
+    parser.add_argument(
+        "--warmstart-epochs",
+        type=int,
+        default=None,
+        help="Override warmstart_epochs in config (use 0 to skip warmstart)",
+    )
+    parser.add_argument(
+        "--warmstart-fade-epochs",
+        type=int,
+        default=None,
+        help="Override warmstart_fade_epochs in config",
+    )
+    parser.add_argument(
+        "--synthetic-num-molecules",
+        type=int,
+        default=None,
+        help="Override number of synthetic molecules (only used with --synthetic)",
+    )
     args = parser.parse_args()
 
     config = TrainConfig(
@@ -36,6 +54,13 @@ def main() -> None:
         checkpoint_dir=Path(args.checkpoint_dir),
         save_every=args.save_every,
     )
+
+    if args.warmstart_epochs is not None:
+        config.warmstart_epochs = args.warmstart_epochs
+    if args.warmstart_fade_epochs is not None:
+        config.warmstart_fade_epochs = args.warmstart_fade_epochs
+    if args.synthetic_num_molecules is not None:
+        config.synthetic_num_molecules = args.synthetic_num_molecules
 
     trainer = Trainer(config)
     trainer.fit()
