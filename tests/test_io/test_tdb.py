@@ -441,3 +441,45 @@ def test_load_tdb_index_rejects_bad_magic(tmp_path):
     bad.write_bytes(b"\x00\x00\x00\x00" + b"\x00" * 100)
     with pytest.raises(AssertionError, match="magic"):
         load_tdb_index(bad)
+
+
+def test_load_tdb_molecule_at_offset_reads_correct_block(tmp_path):
+    """Given the byte offset of a molecule block, load it correctly."""
+    from mongoose.io.tdb import _skip_molecule_block, load_tdb_molecule_at_offset
+
+    tdb_path = tmp_path / "test.tdb"
+    mol_defs = [
+        {
+            "channel_source": 5, "molecule_id": 0, "data_start_index": 100,
+            "waveform": np.arange(50, 100, dtype=np.int16),
+        },
+        {
+            "channel_source": 5, "molecule_id": 1, "data_start_index": 200,
+            "waveform": np.arange(200, 250, dtype=np.int16),
+        },
+        {
+            "channel_source": 9, "molecule_id": 0, "data_start_index": 300,
+            "waveform": np.arange(300, 310, dtype=np.int16),
+        },
+    ]
+    _write_synthetic_tdb(tdb_path, molecules=mol_defs)
+
+    # Compute offsets by streaming through once.
+    header = load_tdb_header(tdb_path)
+    offsets = []
+    with open(tdb_path, "rb") as f:
+        f.seek(header.header_byte_length)
+        for _ in mol_defs:
+            offsets.append(f.tell())
+            _skip_molecule_block(f)
+
+    mol1 = load_tdb_molecule_at_offset(tdb_path, offsets[1])
+    assert mol1.channel_source == 5
+    assert mol1.molecule_id == 1
+    assert mol1.data_start_index == 200
+    assert np.array_equal(mol1.waveform, np.arange(200, 250, dtype=np.int16))
+
+    mol2 = load_tdb_molecule_at_offset(tdb_path, offsets[2])
+    assert mol2.channel_source == 9
+    assert mol2.molecule_id == 0
+    assert np.array_equal(mol2.waveform, np.arange(300, 310, dtype=np.int16))

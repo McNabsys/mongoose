@@ -291,6 +291,26 @@ def load_tdb_index(index_path: str | Path) -> dict[tuple[int, int], int]:
     return result
 
 
+def load_tdb_molecule_at_offset(
+    path: str | Path,
+    byte_offset: int,
+) -> TdbMolecule:
+    """Load a single molecule block from a TDB file at a known byte offset.
+
+    Args:
+        path: Path to the .tdb file.
+        byte_offset: Absolute file offset where the molecule block starts
+            (from a loaded TDB index).
+
+    Returns:
+        A TdbMolecule with waveform data.
+    """
+    path = Path(path)
+    with open(path, "rb") as f:
+        f.seek(byte_offset)
+        return _read_molecule_block(f)
+
+
 def load_tdb_molecule(
     path: str | Path,
     header: TdbHeader,
