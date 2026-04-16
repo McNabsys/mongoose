@@ -16,12 +16,18 @@ Exit codes:
   4 = data integrity failed
   5 = dataset loading failed
 
-Run with:
-    python scripts/sanity_check_preprocess.py \
-      --tdb /path/to/run.tdb \
-      --probes-bin /path/to/run_probes.bin \
-      --assigns /path/to/run_probeassignment.assigns \
-      --reference-map /path/to/run_referenceMap.txt \
+Run with (standard layout):
+    python scripts/sanity_check_preprocess.py \\
+      --run-dir V:/E.\\ coli/Black/<run_id>/<YYYY-MM-DD> \\
+      --run-id STB03-064B-02L58270w05-202G16g
+
+Run with (explicit paths, for non-standard layouts):
+    python scripts/sanity_check_preprocess.py \\
+      --tdbs /path/to/first.tdb /path/to/second.tdb \\
+      --tdb-indexes /path/to/first.tdb_index /path/to/second.tdb_index \\
+      --probes-bin /path/to/run_probes.bin \\
+      --assigns /path/to/run_probeassignment.assigns \\
+      --reference-map /path/to/run_referenceMap.txt \\
       --run-id STB03-064B-02L58270w05-202G16g
 
 To re-validate an existing cache without reprocessing:
@@ -365,11 +371,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Sanity-check preprocessing on a single run"
     )
-    parser.add_argument("--tdb", type=Path, required=False)
-    parser.add_argument("--probes-bin", type=Path, required=False)
-    parser.add_argument("--assigns", type=Path, required=False)
-    parser.add_argument("--reference-map", type=Path, required=False)
     parser.add_argument("--run-id", type=str, required=True)
+    parser.add_argument("--run-dir", type=Path, default=None,
+                        help="Run's date directory; if set, all input paths are auto-resolved.")
+    parser.add_argument("--tdbs", type=Path, nargs="+", default=None,
+                        help="Explicit TDB paths (ordered by file_name_index).")
+    parser.add_argument("--tdb-indexes", type=Path, nargs="+", default=None,
+                        help="Explicit TDB index paths (parallel to --tdbs).")
+    parser.add_argument("--probes-bin", type=Path, default=None)
+    parser.add_argument("--assigns", type=Path, default=None)
+    parser.add_argument("--reference-map", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=Path("cache"))
     parser.add_argument(
         "--skip-preprocess",
@@ -382,7 +393,7 @@ def main() -> int:
     parser.add_argument(
         "--max-cached",
         type=int,
-        default=30000,
+        default=60000,
         help="Maximum expected cached molecules",
     )
     args = parser.parse_args()
@@ -391,25 +402,44 @@ def main() -> int:
 
     # Step 1: Preprocess (unless skipped)
     if not args.skip_preprocess:
-        required = {
-            "--tdb": args.tdb,
-            "--probes-bin": args.probes_bin,
-            "--assigns": args.assigns,
-            "--reference-map": args.reference_map,
-        }
-        missing = [name for name, val in required.items() if val is None]
-        if missing:
-            print(f"FAIL: Missing required arguments for preprocessing: {missing}")
-            return 1
+        # Resolve inputs via --run-dir or explicit paths
+        if args.run_dir is not None:
+            from mongoose.data.run_inputs import resolve_run_inputs
+            inputs = resolve_run_inputs(args.run_dir, args.run_id)
+            tdb_paths = inputs.tdb_paths
+            tdb_index_paths = inputs.tdb_index_paths
+            probes_bin = inputs.probes_bin_path
+            assigns = inputs.assigns_path
+            reference_map = inputs.reference_map_path
+        else:
+            required = {
+                "--tdbs": args.tdbs,
+                "--tdb-indexes": args.tdb_indexes,
+                "--probes-bin": args.probes_bin,
+                "--assigns": args.assigns,
+                "--reference-map": args.reference_map,
+            }
+            missing = [name for name, val in required.items() if val is None]
+            if missing:
+                print(
+                    f"FAIL: Missing required arguments for preprocessing: either --run-dir, or all of {missing}"
+                )
+                return 1
+            tdb_paths = args.tdbs
+            tdb_index_paths = args.tdb_indexes
+            probes_bin = args.probes_bin
+            assigns = args.assigns
+            reference_map = args.reference_map
 
         print(f"Preprocessing run: {args.run_id}")
         try:
             stats = preprocess_run(
                 run_id=args.run_id,
-                tdb_path=args.tdb,
-                probes_bin_path=args.probes_bin,
-                assigns_path=args.assigns,
-                reference_map_path=args.reference_map,
+                tdb_paths=tdb_paths,
+                tdb_index_paths=tdb_index_paths,
+                probes_bin_path=probes_bin,
+                assigns_path=assigns,
+                reference_map_path=reference_map,
                 output_dir=args.output,
             )
             print(
