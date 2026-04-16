@@ -158,6 +158,11 @@ def _read_molecule_block(f) -> TdbMolecule:
     # Molecule samples (int16)
     waveform = np.frombuffer(f.read(total_data_count * 2), dtype=np.int16).copy()
 
+    # Undocumented 4-byte field between waveform and MorphOpen data in
+    # real Nabsys v4 TDBs (not present in v4.6 spec Table 2). Appears to
+    # be a filter-output value; skipped because it is unused downstream.
+    f.read(4)
+
     # MorphOpen
     (morph_count,) = struct.unpack("<I", f.read(4))
     if morph_count > 0:
@@ -198,6 +203,8 @@ def _skip_molecule_block(f) -> None:
 
     # Skip waveform (int16)
     f.read(total_data_count * 2)
+
+    f.read(4)  # undocumented 4-byte field (see _read_molecule_block)
 
     # MorphOpen
     (morph_count,) = struct.unpack("<I", f.read(4))

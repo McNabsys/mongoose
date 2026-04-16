@@ -160,6 +160,10 @@ def _write_synthetic_tdb(
             # Molecule samples (int16)
             f.write(waveform.tobytes())
 
+            # Mystery 4-byte field observed in real v4 TDBs (not in v4.6 spec).
+            # Write zero so synthetic fixtures match real-data layout.
+            f.write(struct.pack("<i", 0))
+
             # MorphOpen: count=0 (omitted)
             f.write(struct.pack("<I", 0))
             # RiseConv: count=0
@@ -244,12 +248,14 @@ def synthetic_tdb_with_index(tmp_path: Path) -> tuple[Path, Path]:
     header = load_tdb_header(tdb_path)
     header_end = header.header_byte_length
 
-    # Each molecule block size: fixed fields + waveform + 3 count fields
+    # Each molecule block size: fixed fields + waveform + mystery field +
+    # 3 count fields
     # fixed = 4+4+8+4+4+4+4+1+4+4+4+4 = 49 bytes
     # waveform = 100 * 2 = 200 bytes
+    # mystery field (undocumented post-waveform int32) = 4 bytes
     # 3 x uint32 counts (all zero) = 12 bytes
-    # total per molecule = 49 + 200 + 12 = 261 bytes
-    mol_block_size = 49 + 100 * 2 + 12
+    # total per molecule = 49 + 200 + 4 + 12 = 265 bytes
+    mol_block_size = 49 + 100 * 2 + 4 + 12
 
     index_records = []
     for i, mol in enumerate(mol_defs):
@@ -483,3 +489,56 @@ def test_load_tdb_molecule_at_offset_reads_correct_block(tmp_path):
     assert mol2.channel_source == 9
     assert mol2.molecule_id == 0
     assert np.array_equal(mol2.waveform, np.arange(300, 310, dtype=np.int16))
+
+
+def test_load_tdb_molecule_skips_post_waveform_mystery_field(tmp_path):
+    """Real Nabsys v4 TDBs contain a 4-byte undocumented field between the
+    molecule sample data and the MorphOpen data. The parser must skip it;
+    otherwise it reads 4 bytes of the next var-length field as a count and
+    immediately hits EOF. This test writes a manual block with the real layout
+    and verifies the parser reads the waveform correctly AND the downstream
+    optional fields parse without error.
+    """
+    import struct
+    from mongoose.io.tdb import load_tdb_header, load_tdb_molecule_at_offset
+
+    tdb_path = tmp_path / "real_layout.tdb"
+
+    # Start with a minimal valid TDB via the fixture writer (no molecules),
+    # then append one hand-crafted block with the real post-waveform layout.
+    _write_synthetic_tdb(tdb_path, molecules=[])
+
+    header = load_tdb_header(tdb_path)
+    block_offset = header.header_byte_length
+
+    waveform = np.arange(50, 100, dtype=np.int16)
+    with open(tdb_path, "ab") as f:
+        # Fixed fields (49 bytes)
+        f.write(struct.pack("<I", 5))          # channel_source
+        f.write(struct.pack("<I", 7))          # molecule_id
+        f.write(struct.pack("<Q", 100))        # data_start_index
+        f.write(struct.pack("<I", 0))          # rise_conv_max_index
+        f.write(struct.pack("<I", 0))          # fall_conv_min_index
+        f.write(struct.pack("<I", 0))          # rise_conv_end_index
+        f.write(struct.pack("<I", 0))          # fall_conv_end_index
+        f.write(struct.pack("<B", 0))          # structured
+        f.write(struct.pack("<I", 0))          # rise_conv_thresh
+        f.write(struct.pack("<I", 0))          # fall_conv_thresh
+        f.write(struct.pack("<i", 0))          # fall_conv_min_value
+        f.write(struct.pack("<I", len(waveform)))  # total_data_count
+        # Waveform
+        f.write(waveform.tobytes())
+        # MYSTERY 4-byte field (real-data layout - this is what broke us)
+        f.write(struct.pack("<i", -1374638515))
+        # MorphOpen count + data
+        f.write(struct.pack("<I", len(waveform)))
+        f.write(waveform.tobytes())  # content doesn't matter
+        # RiseConv count (0) + no data
+        f.write(struct.pack("<I", 0))
+        # FallConv count (0) + no data
+        f.write(struct.pack("<I", 0))
+
+    mol = load_tdb_molecule_at_offset(tdb_path, block_offset)
+    assert mol.channel_source == 5
+    assert mol.molecule_id == 7
+    assert np.array_equal(mol.waveform, waveform)
