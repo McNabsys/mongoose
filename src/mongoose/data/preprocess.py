@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+import struct
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -185,10 +186,11 @@ def preprocess_run(
 
             try:
                 tdb_mol = load_tdb_molecule_at_offset(tdb_paths[fni], offset)
-            except Exception:
+            except (OSError, struct.error, ValueError):
                 logger.warning(
                     "Failed to read TDB molecule at %s offset %d - skipping",
                     tdb_paths[fni].name, offset,
+                    exc_info=True,
                 )
                 skipped_identity += 1
                 continue
