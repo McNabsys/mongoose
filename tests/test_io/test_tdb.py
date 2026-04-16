@@ -22,7 +22,7 @@ from mongoose.io.tdb import (
 NABS_MAGIC = 0x5342414E
 FILE_TYPE_TDB = 71000
 FILE_TYPE_INDEX = 71001
-FILE_VERSION = 3
+FILE_VERSION = 4
 
 # 23 variable-length string field names (content is irrelevant for parsing)
 _STRING_FIELDS = [
@@ -400,3 +400,11 @@ class TestIndexFileAccess:
             )
             assert seq_mol.molecule_id == idx_mol.molecule_id
             np.testing.assert_array_equal(seq_mol.waveform, idx_mol.waveform)
+
+
+def test_load_header_accepts_version_4(tmp_path):
+    """Synthetic TDB written as version=4 must parse cleanly."""
+    tdb_path = tmp_path / "v4.tdb"
+    _write_synthetic_tdb(tdb_path, molecules=[])
+    header = load_tdb_header(tdb_path)
+    assert header.channel_count == 1

@@ -11,7 +11,7 @@ import numpy as np
 NABS_MAGIC = 0x5342414E
 FILE_TYPE_TDB = 71000
 FILE_TYPE_INDEX = 71001
-FILE_VERSION = 3
+FILE_VERSION = 4
 
 # Number of variable-length string fields in the header.
 _NUM_STRING_FIELDS = 23
