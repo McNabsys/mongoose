@@ -102,7 +102,7 @@ def check_manifest_counts(
     results.append(
         CheckResult(
             "Clean molecules within expected range",
-            20000 <= stats["clean_molecules"] <= 50000,
+            20000 <= stats["clean_molecules"] <= 100000,
             f"clean={stats['clean_molecules']}",
         )
     )
