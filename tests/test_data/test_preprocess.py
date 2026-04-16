@@ -40,7 +40,7 @@ def test_preprocess_stats_dataclass():
 def _make_mock_molecule(
     uid, channel, num_probes, transloc_time_ms, mean_lvl1,
     structured=False, folded_start=False, folded_end=False, do_not_use=False,
-    start_ms=100.0, probes=None,
+    start_ms=100.0, probes=None, molecule_id=0, file_name_index=0,
 ):
     """Create a mock Molecule object."""
     mol = MagicMock()
@@ -55,6 +55,8 @@ def _make_mock_molecule(
     mol.do_not_use = do_not_use
     mol.start_ms = start_ms
     mol.probes = probes or []
+    mol.molecule_id = molecule_id
+    mol.file_name_index = file_name_index
     return mol
 
 
@@ -93,7 +95,8 @@ def _make_mock_tdb_molecule(waveform, rise_end=10, fall_min=None):
 
 
 @patch("mongoose.data.preprocess.build_molecule_gt")
-@patch("mongoose.data.preprocess.load_tdb_molecule")
+@patch("mongoose.data.preprocess.load_tdb_molecule_at_offset")
+@patch("mongoose.data.preprocess.load_tdb_index")
 @patch("mongoose.data.preprocess.load_reference_map")
 @patch("mongoose.data.preprocess.load_assigns")
 @patch("mongoose.data.preprocess.load_probes_bin")
@@ -103,6 +106,7 @@ def test_preprocess_run_creates_output_files(
     mock_probes_bin,
     mock_assigns,
     mock_ref_map,
+    mock_load_index,
     mock_load_tdb_mol,
     mock_build_gt,
     tmp_path,
@@ -149,6 +153,9 @@ def test_preprocess_run_creates_output_files(
     # Mock ground truth
     mock_build_gt.return_value = _make_mock_gt()
 
+    # Mock TDB index: channels 2 and 3, molecule_id 0
+    mock_load_index.return_value = {(2, 0): 0, (3, 0): 0}
+
     # Mock TDB molecule with waveform
     mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
         np.ones(500, dtype=np.int16) * 400
@@ -156,7 +163,8 @@ def test_preprocess_run_creates_output_files(
 
     preprocess_run(
         run_id="test_run",
-        tdb_path=Path("fake.tdb"),
+        tdb_paths=[Path("fake.tdb")],
+        tdb_index_paths=[Path("fake.tdb_index")],
         probes_bin_path=Path("fake_probes.bin"),
         assigns_path=Path("fake.assigns"),
         reference_map_path=Path("fake_ref.txt"),
@@ -173,7 +181,8 @@ def test_preprocess_run_creates_output_files(
 
 
 @patch("mongoose.data.preprocess.build_molecule_gt")
-@patch("mongoose.data.preprocess.load_tdb_molecule")
+@patch("mongoose.data.preprocess.load_tdb_molecule_at_offset")
+@patch("mongoose.data.preprocess.load_tdb_index")
 @patch("mongoose.data.preprocess.load_reference_map")
 @patch("mongoose.data.preprocess.load_assigns")
 @patch("mongoose.data.preprocess.load_probes_bin")
@@ -183,6 +192,7 @@ def test_preprocess_run_stats(
     mock_probes_bin,
     mock_assigns,
     mock_ref_map,
+    mock_load_index,
     mock_load_tdb_mol,
     mock_build_gt,
     tmp_path,
@@ -215,13 +225,16 @@ def test_preprocess_run_stats(
     mock_ref_map.return_value = MagicMock()
     mock_build_gt.return_value = _make_mock_gt()
 
+    mock_load_index.return_value = {(2, 0): 0}
+
     mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
         np.ones(300, dtype=np.int16) * 400
     )
 
     stats = preprocess_run(
         run_id="stats_test",
-        tdb_path=Path("fake.tdb"),
+        tdb_paths=[Path("fake.tdb")],
+        tdb_index_paths=[Path("fake.tdb_index")],
         probes_bin_path=Path("fake_probes.bin"),
         assigns_path=Path("fake.assigns"),
         reference_map_path=Path("fake_ref.txt"),
@@ -236,7 +249,8 @@ def test_preprocess_run_stats(
 
 
 @patch("mongoose.data.preprocess.build_molecule_gt")
-@patch("mongoose.data.preprocess.load_tdb_molecule")
+@patch("mongoose.data.preprocess.load_tdb_molecule_at_offset")
+@patch("mongoose.data.preprocess.load_tdb_index")
 @patch("mongoose.data.preprocess.load_reference_map")
 @patch("mongoose.data.preprocess.load_assigns")
 @patch("mongoose.data.preprocess.load_probes_bin")
@@ -246,6 +260,7 @@ def test_preprocess_run_manifest_content(
     mock_probes_bin,
     mock_assigns,
     mock_ref_map,
+    mock_load_index,
     mock_load_tdb_mol,
     mock_build_gt,
     tmp_path,
@@ -275,13 +290,16 @@ def test_preprocess_run_manifest_content(
     mock_ref_map.return_value = MagicMock()
     mock_build_gt.return_value = _make_mock_gt()
 
+    mock_load_index.return_value = {(2, 0): 0}
+
     mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
         np.ones(400, dtype=np.int16) * 500
     )
 
     preprocess_run(
         run_id="manifest_test",
-        tdb_path=Path("fake.tdb"),
+        tdb_paths=[Path("fake.tdb")],
+        tdb_index_paths=[Path("fake.tdb_index")],
         probes_bin_path=Path("fake_probes.bin"),
         assigns_path=Path("fake.assigns"),
         reference_map_path=Path("fake_ref.txt"),
@@ -310,7 +328,8 @@ def test_preprocess_run_manifest_content(
 
 
 @patch("mongoose.data.preprocess.build_molecule_gt")
-@patch("mongoose.data.preprocess.load_tdb_molecule")
+@patch("mongoose.data.preprocess.load_tdb_molecule_at_offset")
+@patch("mongoose.data.preprocess.load_tdb_index")
 @patch("mongoose.data.preprocess.load_reference_map")
 @patch("mongoose.data.preprocess.load_assigns")
 @patch("mongoose.data.preprocess.load_probes_bin")
@@ -320,6 +339,7 @@ def test_preprocess_run_waveform_data(
     mock_probes_bin,
     mock_assigns,
     mock_ref_map,
+    mock_load_index,
     mock_load_tdb_mol,
     mock_build_gt,
     tmp_path,
@@ -348,12 +368,15 @@ def test_preprocess_run_waveform_data(
     mock_ref_map.return_value = MagicMock()
     mock_build_gt.return_value = _make_mock_gt()
 
+    mock_load_index.return_value = {(2, 0): 0}
+
     waveform_data = np.arange(200, dtype=np.int16)
     mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(waveform_data)
 
     preprocess_run(
         run_id="wfm_test",
-        tdb_path=Path("fake.tdb"),
+        tdb_paths=[Path("fake.tdb")],
+        tdb_index_paths=[Path("fake.tdb_index")],
         probes_bin_path=Path("fake_probes.bin"),
         assigns_path=Path("fake.assigns"),
         reference_map_path=Path("fake_ref.txt"),
@@ -373,7 +396,8 @@ def test_preprocess_run_waveform_data(
 
 
 @patch("mongoose.data.preprocess.build_molecule_gt")
-@patch("mongoose.data.preprocess.load_tdb_molecule")
+@patch("mongoose.data.preprocess.load_tdb_molecule_at_offset")
+@patch("mongoose.data.preprocess.load_tdb_index")
 @patch("mongoose.data.preprocess.load_reference_map")
 @patch("mongoose.data.preprocess.load_assigns")
 @patch("mongoose.data.preprocess.load_probes_bin")
@@ -383,6 +407,7 @@ def test_preprocess_filters_low_probe_count(
     mock_probes_bin,
     mock_assigns,
     mock_ref_map,
+    mock_load_index,
     mock_load_tdb_mol,
     mock_build_gt,
     tmp_path,
@@ -409,13 +434,16 @@ def test_preprocess_filters_low_probe_count(
     mock_ref_map.return_value = MagicMock()
     mock_build_gt.return_value = _make_mock_gt()
 
+    mock_load_index.return_value = {(2, 0): 0}
+
     mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
         np.ones(100, dtype=np.int16)
     )
 
     stats = preprocess_run(
         run_id="filter_test",
-        tdb_path=Path("fake.tdb"),
+        tdb_paths=[Path("fake.tdb")],
+        tdb_index_paths=[Path("fake.tdb_index")],
         probes_bin_path=Path("fake_probes.bin"),
         assigns_path=Path("fake.assigns"),
         reference_map_path=Path("fake_ref.txt"),
@@ -428,7 +456,8 @@ def test_preprocess_filters_low_probe_count(
 
 
 @patch("mongoose.data.preprocess.build_molecule_gt")
-@patch("mongoose.data.preprocess.load_tdb_molecule")
+@patch("mongoose.data.preprocess.load_tdb_molecule_at_offset")
+@patch("mongoose.data.preprocess.load_tdb_index")
 @patch("mongoose.data.preprocess.load_reference_map")
 @patch("mongoose.data.preprocess.load_assigns")
 @patch("mongoose.data.preprocess.load_probes_bin")
@@ -438,6 +467,7 @@ def test_preprocess_filters_short_transloc(
     mock_probes_bin,
     mock_assigns,
     mock_ref_map,
+    mock_load_index,
     mock_load_tdb_mol,
     mock_build_gt,
     tmp_path,
@@ -463,13 +493,16 @@ def test_preprocess_filters_short_transloc(
     mock_ref_map.return_value = MagicMock()
     mock_build_gt.return_value = _make_mock_gt()
 
+    mock_load_index.return_value = {(2, 0): 0}
+
     mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
         np.ones(100, dtype=np.int16)
     )
 
     stats = preprocess_run(
         run_id="transloc_test",
-        tdb_path=Path("fake.tdb"),
+        tdb_paths=[Path("fake.tdb")],
+        tdb_index_paths=[Path("fake.tdb_index")],
         probes_bin_path=Path("fake_probes.bin"),
         assigns_path=Path("fake.assigns"),
         reference_map_path=Path("fake_ref.txt"),
@@ -481,7 +514,8 @@ def test_preprocess_filters_short_transloc(
 
 
 @patch("mongoose.data.preprocess.build_molecule_gt")
-@patch("mongoose.data.preprocess.load_tdb_molecule")
+@patch("mongoose.data.preprocess.load_tdb_molecule_at_offset")
+@patch("mongoose.data.preprocess.load_tdb_index")
 @patch("mongoose.data.preprocess.load_reference_map")
 @patch("mongoose.data.preprocess.load_assigns")
 @patch("mongoose.data.preprocess.load_probes_bin")
@@ -491,6 +525,7 @@ def test_preprocess_molecules_pkl_new_schema(
     mock_probes_bin,
     mock_assigns,
     mock_ref_map,
+    mock_load_index,
     mock_load_tdb_mol,
     mock_build_gt,
     tmp_path,
@@ -525,13 +560,16 @@ def test_preprocess_molecules_pkl_new_schema(
         warmstart_durations=durations,
     )
 
+    mock_load_index.return_value = {(2, 0): 0}
+
     mock_load_tdb_mol.return_value = _make_mock_tdb_molecule(
         np.ones(300, dtype=np.int16)
     )
 
     preprocess_run(
         run_id="schema_test",
-        tdb_path=Path("fake.tdb"),
+        tdb_paths=[Path("fake.tdb")],
+        tdb_index_paths=[Path("fake.tdb_index")],
         probes_bin_path=Path("fake_probes.bin"),
         assigns_path=Path("fake.assigns"),
         reference_map_path=Path("fake_ref.txt"),
@@ -564,7 +602,8 @@ def test_preprocess_molecules_pkl_new_schema(
 
 @patch("mongoose.data.preprocess.estimate_level1")
 @patch("mongoose.data.preprocess.build_molecule_gt")
-@patch("mongoose.data.preprocess.load_tdb_molecule")
+@patch("mongoose.data.preprocess.load_tdb_molecule_at_offset")
+@patch("mongoose.data.preprocess.load_tdb_index")
 @patch("mongoose.data.preprocess.load_reference_map")
 @patch("mongoose.data.preprocess.load_assigns")
 @patch("mongoose.data.preprocess.load_probes_bin")
@@ -574,6 +613,7 @@ def test_preprocess_computes_mean_lvl1_from_tdb(
     mock_probes_bin,
     mock_assigns,
     mock_ref_map,
+    mock_load_index,
     mock_load_tdb_mol,
     mock_build_gt,
     mock_estimate_level1,
@@ -605,6 +645,8 @@ def test_preprocess_computes_mean_lvl1_from_tdb(
     mock_ref_map.return_value = MagicMock()
     mock_build_gt.return_value = _make_mock_gt()
 
+    mock_load_index.return_value = {(2, 0): 0}
+
     tdb_mol = _make_mock_tdb_molecule(
         np.ones(300, dtype=np.int16) * 400,
         rise_end=5,
@@ -617,7 +659,8 @@ def test_preprocess_computes_mean_lvl1_from_tdb(
 
     preprocess_run(
         run_id="lvl1_test",
-        tdb_path=Path("fake.tdb"),
+        tdb_paths=[Path("fake.tdb")],
+        tdb_index_paths=[Path("fake.tdb_index")],
         probes_bin_path=Path("fake_probes.bin"),
         assigns_path=Path("fake.assigns"),
         reference_map_path=Path("fake_ref.txt"),
@@ -639,3 +682,73 @@ def test_preprocess_computes_mean_lvl1_from_tdb(
     cond = np.load(tmp_path / "lvl1_test" / "conditioning.npy")
     assert cond.shape == (1, 6)
     assert cond[0, 0] == np.float32(tdb_lvl1)
+
+
+def test_preprocess_waveform_identity_when_probes_bin_skips_tdb_molecule(tmp_path):
+    """When probes.bin omits TDB molecule N, downstream probes.bin record M
+    (M > N) must still load the waveform with the correct (channel, MID).
+
+    This is the bug that made the old positional-indexing code produce
+    mis-paired waveforms the instant probes.bin was a strict subset of TDB.
+    """
+    tdb_header = MagicMock()
+    tdb_header.channel_ids = [2]
+    tdb_header.amplitude_scale_factors = [1.0]
+
+    # Waveforms distinguishable by their first value:
+    # TDB (ch=2,mid=0) = all zeros
+    # TDB (ch=2,mid=1) = all ones    (absent from probes.bin)
+    # TDB (ch=2,mid=2) = all twos
+    mol_at_offset_1000 = _make_mock_tdb_molecule(np.zeros(100, dtype=np.int16))
+    mol_at_offset_3000 = _make_mock_tdb_molecule(np.full(100, 2, dtype=np.int16))
+
+    def fake_index(path):
+        # One TDB with all three molecules present in the index
+        return {(2, 0): 1000, (2, 1): 2000, (2, 2): 3000}
+
+    def fake_load_at_offset(path, offset):
+        # Explicit dispatch -- if offset 2000 (mid=1) ever shows up, KeyError
+        # will make the test fail loudly, proving a subset-skip bug
+        return {1000: mol_at_offset_1000, 3000: mol_at_offset_3000}[offset]
+
+    # Two probes.bin molecules: mid=0 and mid=2. mid=1 missing.
+    probes_file = MagicMock()
+    probes_file.num_molecules = 2
+    probes_file.last_sample_time = 100.0
+    probes_file.molecules = [
+        _make_mock_molecule(uid=0, channel=2, num_probes=10, transloc_time_ms=50.0,
+                             mean_lvl1=0.5, molecule_id=0, file_name_index=0),
+        _make_mock_molecule(uid=1, channel=2, num_probes=10, transloc_time_ms=50.0,
+                             mean_lvl1=0.5, molecule_id=2, file_name_index=0),
+    ]
+
+    assign = MagicMock()
+    assign.ref_index = 0
+
+    with patch("mongoose.data.preprocess.load_tdb_header", return_value=tdb_header), \
+         patch("mongoose.data.preprocess.load_tdb_index", side_effect=fake_index), \
+         patch("mongoose.data.preprocess.load_tdb_molecule_at_offset", side_effect=fake_load_at_offset), \
+         patch("mongoose.data.preprocess.load_probes_bin", return_value=probes_file), \
+         patch("mongoose.data.preprocess.load_assigns", return_value=[assign, assign]), \
+         patch("mongoose.data.preprocess.load_reference_map", return_value=MagicMock()), \
+         patch("mongoose.data.preprocess.build_molecule_gt", return_value=_make_mock_gt()), \
+         patch("mongoose.data.preprocess.estimate_level1", return_value=0.5):
+
+        stats = preprocess_run(
+            run_id="subset",
+            tdb_paths=[Path("fake.tdb")],
+            tdb_index_paths=[Path("fake.tdb_index")],
+            probes_bin_path=Path("fake_probes.bin"),
+            assigns_path=Path("fake.assigns"),
+            reference_map_path=Path("fake_ref.txt"),
+            output_dir=tmp_path,
+        )
+
+    assert stats.cached_molecules == 2
+
+    # Verify waveforms pair by identity.
+    waveforms_path = tmp_path / "subset" / "waveforms.bin"
+    data = np.fromfile(waveforms_path, dtype=np.int16)
+    assert data.size == 200, f"expected 200 int16 samples, got {data.size}"
+    assert data[0:100].tolist() == [0] * 100, "first molecule should be all zeros (ch=2, mid=0)"
+    assert data[100:200].tolist() == [2] * 100, "second molecule should be all twos (ch=2, mid=2), NOT mid=1"
