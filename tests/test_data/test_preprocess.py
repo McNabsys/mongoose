@@ -752,3 +752,72 @@ def test_preprocess_waveform_identity_when_probes_bin_skips_tdb_molecule(tmp_pat
     assert data.size == 200, f"expected 200 int16 samples, got {data.size}"
     assert data[0:100].tolist() == [0] * 100, "first molecule should be all zeros (ch=2, mid=0)"
     assert data[100:200].tolist() == [2] * 100, "second molecule should be all twos (ch=2, mid=2), NOT mid=1"
+
+
+def test_preprocess_routes_molecules_by_file_name_index(tmp_path):
+    """Two TDBs, one molecule from each. Verify waveforms go to correct TDB."""
+    tdb_a_header = MagicMock()
+    tdb_a_header.channel_ids = [2]
+    tdb_a_header.amplitude_scale_factors = [1.0]
+    tdb_b_header = MagicMock()
+    tdb_b_header.channel_ids = [2]
+    tdb_b_header.amplitude_scale_factors = [1.0]
+
+    wave_a = np.full(100, 7, dtype=np.int16)
+    wave_b = np.full(100, 42, dtype=np.int16)
+
+    tdb_a_mol = _make_mock_tdb_molecule(wave_a)
+    tdb_b_mol = _make_mock_tdb_molecule(wave_b)
+
+    def fake_header(path):
+        return {Path("a.tdb"): tdb_a_header, Path("b.tdb"): tdb_b_header}[Path(path)]
+
+    def fake_index(path):
+        return {
+            Path("a.tdb_index"): {(2, 0): 1000},
+            Path("b.tdb_index"): {(2, 0): 2000},
+        }[Path(path)]
+
+    def fake_at_offset(path, offset):
+        return {
+            (Path("a.tdb"), 1000): tdb_a_mol,
+            (Path("b.tdb"), 2000): tdb_b_mol,
+        }[(Path(path), offset)]
+
+    probes_file = MagicMock()
+    probes_file.num_molecules = 2
+    probes_file.last_sample_time = 100.0
+    probes_file.molecules = [
+        _make_mock_molecule(uid=0, channel=2, num_probes=10, transloc_time_ms=50.0,
+                             mean_lvl1=0.5, molecule_id=0, file_name_index=0),
+        _make_mock_molecule(uid=1, channel=2, num_probes=10, transloc_time_ms=50.0,
+                             mean_lvl1=0.5, molecule_id=0, file_name_index=1),
+    ]
+
+    assign = MagicMock()
+    assign.ref_index = 0
+
+    with patch("mongoose.data.preprocess.load_tdb_header", side_effect=fake_header), \
+         patch("mongoose.data.preprocess.load_tdb_index", side_effect=fake_index), \
+         patch("mongoose.data.preprocess.load_tdb_molecule_at_offset", side_effect=fake_at_offset), \
+         patch("mongoose.data.preprocess.load_probes_bin", return_value=probes_file), \
+         patch("mongoose.data.preprocess.load_assigns", return_value=[assign, assign]), \
+         patch("mongoose.data.preprocess.load_reference_map", return_value=MagicMock()), \
+         patch("mongoose.data.preprocess.build_molecule_gt", return_value=_make_mock_gt()), \
+         patch("mongoose.data.preprocess.estimate_level1", return_value=0.5):
+
+        stats = preprocess_run(
+            run_id="multi",
+            tdb_paths=[Path("a.tdb"), Path("b.tdb")],
+            tdb_index_paths=[Path("a.tdb_index"), Path("b.tdb_index")],
+            probes_bin_path=Path("fake_probes.bin"),
+            assigns_path=Path("fake.assigns"),
+            reference_map_path=Path("fake_ref.txt"),
+            output_dir=tmp_path,
+        )
+
+    assert stats.cached_molecules == 2
+
+    data = np.fromfile(tmp_path / "multi" / "waveforms.bin", dtype=np.int16)
+    assert data[0:100].tolist() == [7] * 100, "mol 0 came from TDB A (file_name_index=0)"
+    assert data[100:200].tolist() == [42] * 100, "mol 1 came from TDB B (file_name_index=1)"
