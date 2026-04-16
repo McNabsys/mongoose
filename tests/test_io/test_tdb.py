@@ -408,3 +408,36 @@ def test_load_header_accepts_version_4(tmp_path):
     _write_synthetic_tdb(tdb_path, molecules=[])
     header = load_tdb_header(tdb_path)
     assert header.channel_count == 1
+
+
+def test_load_tdb_index_returns_channel_mid_dict(tmp_path):
+    """load_tdb_index returns dict keyed by (channel, MID) mapping to byte offset."""
+    from mongoose.io.tdb import load_tdb_index
+
+    index_path = tmp_path / "test.tdb_index"
+    # Three molecules: channel 5 mid 0 @ offset 1000; channel 5 mid 1 @ 2500;
+    # channel 9 mid 0 @ 4000. Note (channel, mid) is unique but mid repeats across channels.
+    _write_synthetic_index(
+        index_path,
+        [
+            {"channel_source": 5, "molecule_id": 0, "byte_offset": 1000},
+            {"channel_source": 5, "molecule_id": 1, "byte_offset": 2500},
+            {"channel_source": 9, "molecule_id": 0, "byte_offset": 4000},
+        ],
+    )
+
+    idx = load_tdb_index(index_path)
+
+    assert idx[(5, 0)] == 1000
+    assert idx[(5, 1)] == 2500
+    assert idx[(9, 0)] == 4000
+    assert len(idx) == 3
+
+
+def test_load_tdb_index_rejects_bad_magic(tmp_path):
+    from mongoose.io.tdb import load_tdb_index
+
+    bad = tmp_path / "bad.tdb_index"
+    bad.write_bytes(b"\x00\x00\x00\x00" + b"\x00" * 100)
+    with pytest.raises(AssertionError, match="magic"):
+        load_tdb_index(bad)

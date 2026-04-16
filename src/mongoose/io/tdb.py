@@ -250,6 +250,47 @@ def _get_molecule_offset_from_index(index_path: Path, molecule_index: int) -> in
         return byte_offset
 
 
+def load_tdb_index(index_path: str | Path) -> dict[tuple[int, int], int]:
+    """Load a TDB index file into a (channel, MID) -> byte_offset dict.
+
+    Args:
+        index_path: Path to the _index file.
+
+    Returns:
+        Dict mapping (channel_source, MID) to the molecule's byte offset
+        in its TDB file. MID is the per-channel sequential molecule ID.
+    """
+    index_path = Path(index_path)
+    result: dict[tuple[int, int], int] = {}
+
+    with open(index_path, "rb") as f:
+        (magic,) = struct.unpack("<I", f.read(4))
+        assert magic == NABS_MAGIC, f"Bad index magic: {magic:#010x}"
+
+        (file_type,) = struct.unpack("<I", f.read(4))
+        assert file_type == FILE_TYPE_INDEX, f"Not an index file: {file_type}"
+
+        # Version: spec says "must match base file version" but separately
+        # documents the index as "File version 1". We don't enforce here;
+        # format of the record itself hasn't changed.
+        f.read(4)
+
+        # Records: (channel:uint32, mid:uint32, offset:uint64) = 16 bytes each.
+        while True:
+            data = f.read(16)
+            if len(data) == 0:
+                break
+            if len(data) < 16:
+                raise ValueError(
+                    f"Truncated index record at {f.tell() - len(data)}: "
+                    f"got {len(data)} bytes, expected 16"
+                )
+            channel, mid, offset = struct.unpack("<IIQ", data)
+            result[(channel, mid)] = offset
+
+    return result
+
+
 def load_tdb_molecule(
     path: str | Path,
     header: TdbHeader,
