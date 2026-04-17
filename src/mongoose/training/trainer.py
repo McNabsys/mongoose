@@ -6,9 +6,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset, random_split
 
+from mongoose.data.cached_dataset import CachedMoleculeDataset
 from mongoose.data.collate import collate_molecules
 from mongoose.data.dataset import SyntheticMoleculeDataset
 from mongoose.losses.combined import CombinedLoss
@@ -82,17 +84,39 @@ class Trainer:
                 min_length=config.synthetic_min_length,
                 max_length=config.synthetic_max_length,
             )
-            # 80/20 train/val split
-            n_val = max(1, len(full_dataset) // 5)
-            n_train = len(full_dataset) - n_val
+        else:
+            if not config.cache_dirs:
+                raise ValueError(
+                    "Non-synthetic training requires TrainConfig.cache_dirs to "
+                    "be a non-empty list of preprocessed cache directories."
+                )
+            full_dataset = CachedMoleculeDataset(
+                config.cache_dirs, augment=config.augment_train
+            )
+            if config.max_molecules is not None and config.max_molecules < len(
+                full_dataset
+            ):
+                # Deterministic subsample for smoke training.
+                rng = np.random.default_rng(config.split_seed)
+                indices = rng.choice(
+                    len(full_dataset), size=config.max_molecules, replace=False
+                ).tolist()
+                full_dataset = Subset(full_dataset, indices)
+
+        # Train/val split (shared by synthetic and cached datasets).
+        n_total = len(full_dataset)
+        n_val = max(1, int(round(n_total * config.val_fraction)))
+        n_val = min(n_val, n_total - 1) if n_total > 1 else 0
+        n_train = n_total - n_val
+        if n_val == 0:
+            # Single-molecule edge case: reuse the sole sample for both loaders.
+            train_dataset = full_dataset
+            val_dataset = full_dataset
+        else:
             train_dataset, val_dataset = random_split(
                 full_dataset,
                 [n_train, n_val],
-                generator=torch.Generator().manual_seed(42),
-            )
-        else:
-            raise NotImplementedError(
-                "Real data loading not yet implemented. Use --synthetic."
+                generator=torch.Generator().manual_seed(config.split_seed),
             )
 
         self.train_loader = DataLoader(
