@@ -13,6 +13,18 @@ class TrainConfig:
     # Data
     data_dir: Path = Path("data")
     num_workers: int = 0
+    # Real-data cache directories (list of preprocessed cache dirs). When
+    # use_synthetic=False, at least one cache_dir is required.
+    cache_dirs: list[Path] | None = None
+    # If set, cap the combined dataset to this many molecules after
+    # concatenation (useful for CPU smoke training on a subsample).
+    max_molecules: int | None = None
+    # Fraction of the dataset used for validation (80/20 default).
+    val_fraction: float = 0.2
+    # Random seed for the train/val split.
+    split_seed: int = 42
+    # Whether to apply data augmentations to the training split.
+    augment_train: bool = False
 
     # Model
     in_channels: int = 1
