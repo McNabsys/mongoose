@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.tensorboard import SummaryWriter
 
 from mongoose.data.cached_dataset import CachedMoleculeDataset
 from mongoose.data.collate import collate_molecules
@@ -75,6 +76,13 @@ class Trainer:
         self.epoch_metrics: list[dict[str, Any]] = []
         self.start_epoch: int = 0
         self.best_val_loss: float = float("inf")
+
+        # TensorBoard: write scalars to <checkpoint_dir>/tb/. Point tensorboard
+        # at the parent of checkpoint_dir (e.g. tensorboard_runs/) to compare
+        # multiple runs side-by-side.
+        tb_dir = Path(config.checkpoint_dir) / "tb"
+        tb_dir.mkdir(parents=True, exist_ok=True)
+        self.writer: SummaryWriter | None = SummaryWriter(log_dir=str(tb_dir))
 
         # Load checkpoint if one exists
         self._maybe_load_checkpoint()
@@ -171,7 +179,28 @@ class Trainer:
             self.epoch_metrics.append(combined)
 
             self._log(epoch, train_metrics, val_metrics)
+            self._tb_log(epoch, combined)
             self._maybe_save_checkpoint(epoch, val_metrics)
+
+        if self.writer is not None:
+            self.writer.flush()
+            self.writer.close()
+
+    def _tb_log(self, epoch: int, combined: dict[str, Any]) -> None:
+        """Emit per-epoch scalars to TensorBoard (no-op if writer is None)."""
+        if self.writer is None:
+            return
+        blend = float(getattr(self.criterion, "_warmstart_blend", 0.0))
+        w = self.writer
+        w.add_scalar("loss/train_total", combined["train_loss"], epoch)
+        w.add_scalar("loss/val_total", combined["val_loss"], epoch)
+        for comp in ("probe", "bp", "vel", "count"):
+            w.add_scalar(f"train_scaled/{comp}", combined[f"train_{comp}"], epoch)
+            w.add_scalar(f"val_scaled/{comp}", combined[f"val_{comp}"], epoch)
+            w.add_scalar(f"train_raw/{comp}", combined[f"train_{comp}_raw"], epoch)
+        w.add_scalar("schedule/lr", combined["lr"], epoch)
+        w.add_scalar("schedule/blend", blend, epoch)
+        w.flush()
 
     def _train_one_epoch(self, epoch: int) -> dict[str, float]:
         """Run one training epoch."""
