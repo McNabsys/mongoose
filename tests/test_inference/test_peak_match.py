@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from mongoose.inference.peak_match import (
+    aggregate_per_molecule_metrics,
     compute_metrics,
     match_peaks,
 )
@@ -116,3 +117,20 @@ def test_compute_metrics_zero_tp_returns_zero_f1():
     assert m["precision"] == 0.0
     assert m["recall"] == 0.0
     assert m["f1"] == 0.0
+
+
+def test_aggregate_per_molecule_metrics_basic():
+    mols = [
+        {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+        {"precision": 0.0, "recall": 0.0, "f1": 0.0},
+    ]
+    result = aggregate_per_molecule_metrics(mols)
+    assert result["precision"] == pytest.approx(0.5)
+    assert result["recall"] == pytest.approx(0.5)
+    assert result["f1"] == pytest.approx(0.5)
+    assert result["n_molecules"] == 2
+
+
+def test_aggregate_per_molecule_metrics_empty():
+    result = aggregate_per_molecule_metrics([])
+    assert result == {"precision": 0.0, "recall": 0.0, "f1": 0.0, "n_molecules": 0}
