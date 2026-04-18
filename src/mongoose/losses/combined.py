@@ -52,6 +52,10 @@ class CombinedLoss:
         tag_width_bp: float = 511.0,
         sample_period_ms: float = 0.025,
         min_blend: float = 0.0,
+        scale_probe: float = 1.0,
+        scale_bp: float = 1.0,
+        scale_vel: float = 1.0,
+        scale_count: float = 1.0,
     ) -> None:
         self.lambda_bp = lambda_bp
         self.lambda_vel = lambda_vel
@@ -68,6 +72,10 @@ class CombinedLoss:
         self.tag_width_bp = tag_width_bp
         self.sample_period_ms = sample_period_ms
         self.min_blend = float(min_blend)
+        self.scale_probe = max(float(scale_probe), 1e-6)
+        self.scale_bp = max(float(scale_bp), 1e-6)
+        self.scale_vel = max(float(scale_vel), 1e-6)
+        self.scale_count = max(float(scale_count), 1e-6)
 
         # Current effective lambdas and warmstart blend (updated by set_epoch).
         self.current_lambda_bp: float = 0.0
@@ -234,18 +242,30 @@ class CombinedLoss:
         vel_loss = torch.stack(vel_terms).mean() if vel_terms else zero
         count_loss_value = torch.stack(count_terms).mean() if count_terms else zero
 
+        # Scale each component by its hardcoded divisor so lambda values
+        # mean "contribute roughly equal gradient" instead of being 4-5
+        # orders of magnitude apart (see spec sec. 3.2).
+        scaled_probe = probe_loss / self.scale_probe
+        scaled_bp = bp_loss / self.scale_bp
+        scaled_vel = vel_loss / self.scale_vel
+        scaled_count = count_loss_value / self.scale_count
+
         total = (
-            probe_loss
-            + self.current_lambda_bp * bp_loss
-            + self.current_lambda_vel * vel_loss
-            + self.current_lambda_count * count_loss_value
+            scaled_probe
+            + self.current_lambda_bp * scaled_bp
+            + self.current_lambda_vel * scaled_vel
+            + self.current_lambda_count * scaled_count
         )
 
         details: dict[str, Any] = {
-            "probe": probe_loss.detach().item(),
-            "bp": bp_loss.detach().item(),
-            "vel": vel_loss.detach().item(),
-            "count": count_loss_value.detach().item(),
+            "probe": scaled_probe.detach().item(),
+            "bp": scaled_bp.detach().item(),
+            "vel": scaled_vel.detach().item(),
+            "count": scaled_count.detach().item(),
+            "probe_raw": probe_loss.detach().item(),
+            "bp_raw": bp_loss.detach().item(),
+            "vel_raw": vel_loss.detach().item(),
+            "count_raw": count_loss_value.detach().item(),
             "warmstart_blend": blend,
         }
         return total, details

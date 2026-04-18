@@ -389,3 +389,44 @@ def test_combined_loss_blend_floor_applies_with_no_warmstart():
     )
     criterion.set_epoch(0)
     assert criterion._warmstart_blend == 0.1
+
+
+def test_combined_loss_scale_divisors_normalize_components(minimal_batch):
+    """Raw loss components are divided by their scale divisors before lambda weighting."""
+    plain = CombinedLoss(warmstart_epochs=0)
+    scaled = CombinedLoss(
+        warmstart_epochs=0,
+        scale_probe=1.0,
+        scale_bp=100.0,
+        scale_vel=10.0,
+        scale_count=1.0,
+    )
+    plain.set_epoch(0)
+    scaled.set_epoch(0)
+
+    # Note: `minimal_batch` fixture uses abbreviated dict keys (ref_bp, n_ref)
+    # that need translating to CombinedLoss.__call__ kwargs.
+    kwargs = dict(
+        pred_heatmap=minimal_batch["pred_heatmap"],
+        pred_cumulative_bp=minimal_batch["pred_cumulative_bp"],
+        raw_velocity=minimal_batch["raw_velocity"],
+        reference_bp_positions_list=minimal_batch["ref_bp"],
+        n_ref_probes=minimal_batch["n_ref"],
+        warmstart_heatmap=None,
+        warmstart_valid=None,
+        mask=minimal_batch["mask"],
+    )
+
+    _, details_plain = plain(**kwargs)
+    _, details_scaled = scaled(**kwargs)
+
+    # After the change, details should expose BOTH scaled (under
+    # existing keys "probe"/"bp"/"vel"/"count") AND raw values under new
+    # "*_raw" keys. Cross-check both sides.
+    assert details_scaled["probe_raw"] == details_plain["probe_raw"]
+    assert details_scaled["bp_raw"] == details_plain["bp_raw"]
+    assert abs(details_scaled["bp"] - details_plain["bp_raw"] / 100.0) < 1e-5
+    # Use relative tolerance for vel since raw values can reach ~10^4 in float32
+    assert abs(details_scaled["vel"] - details_plain["vel_raw"] / 10.0) < 1e-4
+    assert abs(details_scaled["count"] - details_plain["count_raw"] / 1.0) < 1e-5
+    assert abs(details_scaled["probe"] - details_plain["probe_raw"] / 1.0) < 1e-5
