@@ -58,10 +58,9 @@ class Trainer:
             self.optimizer, T_max=config.epochs, eta_min=config.min_lr
         )
 
-        # Mixed precision scaler
-        self.scaler = torch.amp.GradScaler(
-            "cuda", enabled=config.use_amp and self.device.type == "cuda"
-        )
+        # bfloat16 autocast has fp32 exponent range, so GradScaler is unnecessary.
+        # Keep the object so checkpoint load/save shape doesn't change.
+        self.scaler = torch.amp.GradScaler("cuda", enabled=False)
 
         # Data
         self._build_dataloaders()
@@ -251,16 +250,21 @@ class Trainer:
             warmstart_valid = warmstart_valid.to(self.device)
 
         with torch.amp.autocast(
-            "cuda", enabled=self.config.use_amp and self.device.type == "cuda"
+            "cuda",
+            dtype=torch.bfloat16,
+            enabled=self.config.use_amp and self.device.type == "cuda",
         ):
             probe_heatmap, cumulative_bp, raw_velocity = self.model(
                 waveform, conditioning, mask
             )
 
+        # Loss runs in fp32: focal_loss' eps clamp and soft_dtw's squared cost
+        # matrix are not safe in fp16/bf16 mantissa precision or range.
+        with torch.amp.autocast("cuda", enabled=False):
             loss, details = self.criterion(
-                pred_heatmap=probe_heatmap,
-                pred_cumulative_bp=cumulative_bp,
-                raw_velocity=raw_velocity,
+                pred_heatmap=probe_heatmap.float(),
+                pred_cumulative_bp=cumulative_bp.float(),
+                raw_velocity=raw_velocity.float(),
                 reference_bp_positions_list=reference_bp_positions_list,
                 n_ref_probes=n_ref_probes,
                 warmstart_heatmap=warmstart_heatmap,
