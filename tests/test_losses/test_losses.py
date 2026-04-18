@@ -357,3 +357,24 @@ def test_peakiness_regularizer_all_ones_zero_loss():
     heatmap = torch.ones(100)
     loss = peakiness_regularizer(heatmap, window=20)
     assert loss.item() < 1e-6
+
+
+def test_combined_loss_blend_floor_holds_at_late_epoch():
+    """min_blend=0.1 means focal loss never fully disappears."""
+    criterion = CombinedLoss(
+        warmstart_epochs=5,
+        warmstart_fade_epochs=2,
+        min_blend=0.1,
+    )
+    criterion.set_epoch(100)
+    assert criterion._warmstart_blend == 0.1
+
+
+def test_combined_loss_blend_floor_defaults_to_zero():
+    """Default min_blend=0.0 preserves existing post-fade behavior (blend=0)."""
+    criterion = CombinedLoss(
+        warmstart_epochs=5,
+        warmstart_fade_epochs=2,
+    )
+    criterion.set_epoch(100)
+    assert criterion._warmstart_blend == 0.0

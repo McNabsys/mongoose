@@ -51,6 +51,7 @@ class CombinedLoss:
         nms_threshold: float = 0.3,
         tag_width_bp: float = 511.0,
         sample_period_ms: float = 0.025,
+        min_blend: float = 0.0,
     ) -> None:
         self.lambda_bp = lambda_bp
         self.lambda_vel = lambda_vel
@@ -66,6 +67,7 @@ class CombinedLoss:
         self.nms_threshold = nms_threshold
         self.tag_width_bp = tag_width_bp
         self.sample_period_ms = sample_period_ms
+        self.min_blend = float(min_blend)
 
         # Current effective lambdas and warmstart blend (updated by set_epoch).
         self.current_lambda_bp: float = 0.0
@@ -90,6 +92,10 @@ class CombinedLoss:
             self._warmstart_blend = max(0.0, 1.0 - frac)
         else:
             self._warmstart_blend = 0.0
+
+        # Apply floor so focal supervision never fully disappears.
+        if self._warmstart_blend < self.min_blend:
+            self._warmstart_blend = self.min_blend
 
         # Lambda schedule: 0.5x target during warmstart, ramping to 1.0x after.
         if self.warmstart_epochs <= 0:
