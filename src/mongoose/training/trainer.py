@@ -156,6 +156,10 @@ class Trainer:
                 "train_bp": train_metrics["bp_loss"],
                 "train_vel": train_metrics["vel_loss"],
                 "train_count": train_metrics["count_loss"],
+                "train_probe_raw": train_metrics["probe_raw"],
+                "train_bp_raw": train_metrics["bp_raw"],
+                "train_vel_raw": train_metrics["vel_raw"],
+                "train_count_raw": train_metrics["count_raw"],
                 "val_loss": val_metrics["loss"],
                 "val_probe": val_metrics["probe_loss"],
                 "val_bp": val_metrics["bp_loss"],
@@ -176,6 +180,10 @@ class Trainer:
         total_bp = 0.0
         total_vel = 0.0
         total_count = 0.0
+        total_probe_raw = 0.0
+        total_bp_raw = 0.0
+        total_vel_raw = 0.0
+        total_count_raw = 0.0
         num_batches = 0
 
         for batch in self.train_loader:
@@ -195,6 +203,10 @@ class Trainer:
             total_bp += float(details["bp"])
             total_vel += float(details["vel"])
             total_count += float(details["count"])
+            total_probe_raw += float(details["probe_raw"])
+            total_bp_raw += float(details["bp_raw"])
+            total_vel_raw += float(details["vel_raw"])
+            total_count_raw += float(details["count_raw"])
             num_batches += 1
 
         n = max(num_batches, 1)
@@ -204,6 +216,10 @@ class Trainer:
             "bp_loss": total_bp / n,
             "vel_loss": total_vel / n,
             "count_loss": total_count / n,
+            "probe_raw": total_probe_raw / n,
+            "bp_raw": total_bp_raw / n,
+            "vel_raw": total_vel_raw / n,
+            "count_raw": total_count_raw / n,
         }
 
     @torch.no_grad()
@@ -215,6 +231,10 @@ class Trainer:
         total_bp = 0.0
         total_vel = 0.0
         total_count = 0.0
+        total_probe_raw = 0.0
+        total_bp_raw = 0.0
+        total_vel_raw = 0.0
+        total_count_raw = 0.0
         num_batches = 0
 
         for batch in self.val_loader:
@@ -224,6 +244,10 @@ class Trainer:
             total_bp += float(details["bp"])
             total_vel += float(details["vel"])
             total_count += float(details["count"])
+            total_probe_raw += float(details["probe_raw"])
+            total_bp_raw += float(details["bp_raw"])
+            total_vel_raw += float(details["vel_raw"])
+            total_count_raw += float(details["count_raw"])
             num_batches += 1
 
         n = max(num_batches, 1)
@@ -233,6 +257,10 @@ class Trainer:
             "bp_loss": total_bp / n,
             "vel_loss": total_vel / n,
             "count_loss": total_count / n,
+            "probe_raw": total_probe_raw / n,
+            "bp_raw": total_bp_raw / n,
+            "vel_raw": total_vel_raw / n,
+            "count_raw": total_count_raw / n,
         }
 
     def _step(self, batch: dict) -> tuple[torch.Tensor, dict[str, Any]]:
@@ -292,7 +320,11 @@ class Trainer:
             f"count={train_metrics['count_loss']:.4f} | "
             f"val_loss={val_metrics['loss']:.4f} | "
             f"blend={blend:.3f} | "
-            f"lr={lr:.6f}"
+            f"lr={lr:.6f} | "
+            f"raw[p={train_metrics['probe_raw']:.2f} "
+            f"bp={train_metrics['bp_raw']:.0f} "
+            f"vel={train_metrics['vel_raw']:.0f} "
+            f"count={train_metrics['count_raw']:.2f}]"
         )
         print(msg)
         logger.info(msg)

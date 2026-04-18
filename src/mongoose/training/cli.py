@@ -122,6 +122,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Divisor applied to raw probe_loss for per-component gradient balance.",
     )
+    parser.add_argument(
+        "--min-lr",
+        type=float,
+        default=None,
+        help="Override the cosine scheduler's minimum LR (default: 1e-6 from TrainConfig).",
+    )
     return parser
 
 
@@ -182,6 +188,8 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         config.scale_count = args.scale_count
     if args.scale_probe is not None:
         config.scale_probe = args.scale_probe
+    if args.min_lr is not None:
+        config.min_lr = args.min_lr
 
     return config
 
