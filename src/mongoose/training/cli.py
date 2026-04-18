@@ -104,9 +104,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Divisor applied to raw bp_loss for per-component gradient balance.",
     )
-    parser.add_argument("--scale-vel", type=float, default=None)
-    parser.add_argument("--scale-count", type=float, default=None)
-    parser.add_argument("--scale-probe", type=float, default=None)
+    parser.add_argument(
+        "--scale-vel",
+        type=float,
+        default=None,
+        help="Divisor applied to raw vel_loss for per-component gradient balance.",
+    )
+    parser.add_argument(
+        "--scale-count",
+        type=float,
+        default=None,
+        help="Divisor applied to raw count_loss for per-component gradient balance.",
+    )
+    parser.add_argument(
+        "--scale-probe",
+        type=float,
+        default=None,
+        help="Divisor applied to raw probe_loss for per-component gradient balance.",
+    )
     return parser
 
 
