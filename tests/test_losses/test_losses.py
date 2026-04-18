@@ -378,3 +378,14 @@ def test_combined_loss_blend_floor_defaults_to_zero():
     )
     criterion.set_epoch(100)
     assert criterion._warmstart_blend == 0.0
+
+
+def test_combined_loss_blend_floor_applies_with_no_warmstart():
+    """Floor must apply even when warmstart_epochs=0 (overfit gate uses this)."""
+    criterion = CombinedLoss(
+        warmstart_epochs=0,
+        warmstart_fade_epochs=0,
+        min_blend=0.1,
+    )
+    criterion.set_epoch(0)
+    assert criterion._warmstart_blend == 0.1
