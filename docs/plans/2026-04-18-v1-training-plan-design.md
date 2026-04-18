@@ -82,38 +82,46 @@ because wfmproc is currently our only peak-position supervision signal;
 the bias is the floor of what the model could learn from data it has
 access to.
 
-### 3.2 Running-mean loss-scale normalization
+### 3.2 Static order-of-magnitude loss-scale normalization
 
-Add `_scale_ema` state to `CombinedLoss` tracking a per-component
-exponential moving average of unweighted loss magnitude (probe, bp,
-vel, count). On forward, divide each raw loss by its scale (detached,
-gradient does not flow through the divisor) before applying `λ`.
+Divide each raw unweighted loss by a **hardcoded** constant representing
+its typical scale, before applying `λ`. Scales chosen from tonight's
+measured values:
 
-EMA decay: 0.99. Initialization: first batch sets the scale. Per-batch
-order of operations: (1) compute raw losses, (2) divide each by the
-**previous-batch** EMA (so the current gradient uses a stable denominator),
-(3) update the EMA with the newly-observed raw loss for use by the next
-batch. Floor scale at `1e-6` to avoid division-by-zero if a loss term is
-legitimately zero early.
+| Term | Raw magnitude (tonight) | Scale divisor | Normalized |
+|------|--------------------------|---------------|------------|
+| probe | ~1.0 | 1.0 | ~1.0 |
+| bp | ~30,000 | 30,000 | ~1.0 |
+| vel | ~5,000 | 5,000 | ~1.0 |
+| count | ~0.5-5 | 1.0 | ~1.0 |
 
-Effect: `λ_* = 1.0` now means "this component contributes equal gradient
-magnitude." Retuning by loss term reduces to intuitive scalar choice.
+Effect: `λ_* = 1.0` now means "each term contributes roughly equal
+gradient." Retuning by term reduces to scalar choice. The scales are
+compile-time constants — no state to serialize, no EMA drift, no
+divide-by-near-zero failure mode.
 
-Cost: Small amount of extra state to serialize in the checkpoint
-(scheduler state already opts in to pickling, so EMA floats go in
-cleanly). Slight warmup oddness on the very first batch since the EMA
-hasn't stabilized, but the first batch won't dominate training anyway.
+Not using running-mean EMA: a detached EMA would mathematically work and
+adapt to different runs, but it behaves approximately like optimizing
+`log(raw_loss)`, which is unstable when any term approaches zero (plausible
+for `count_loss` which already reaches 0.5 early). Simpler static scaling
+has no such pathology at the cost of potential per-run retuning.
+
+If Phase 2's first smoke reveals substantially different magnitudes on
+multi-batch averaging, we revise the divisors in Phase 2b. Constants
+live in `CombinedLoss.__init__` as defaulted arguments
+(`scale_bp=30000.0`, etc.) so they can be overridden from the CLI if
+needed.
 
 ### 3.3 Tests
 
 - `test_combined_blend_floor`: set `min_blend=0.2`, step to epoch 100,
   assert `_warmstart_blend == 0.2`.
-- `test_combined_scale_normalization_stabilizes`: feed a batch with
-  known-imbalanced raw losses, step 50 batches, assert each scaled
-  component in `details` is ≈ 1.0 within tolerance.
+- `test_combined_scale_normalization`: feed a batch with
+  known-imbalanced raw losses, assert each scaled component in
+  `details` is the raw value divided by its divisor.
 - Regression test: existing `CombinedLoss` behavior with
-  `min_blend=0.0, scale_normalize=False` stays numerically identical to
-  what tonight's code produced.
+  `min_blend=0.0` and all `scale_*` divisors set to 1.0 stays
+  numerically identical to the pre-change implementation.
 
 ---
 
@@ -133,15 +141,32 @@ optional `--run-ids` filter, optional `--max-molecules`.
    b. Extract peaks via existing `extract_peak_indices`.
    c. Load reference peaks from `warmstart_probe_centers_samples` in the
       manifest.
-   d. Match predicted peaks to references with greedy bipartite matching
-      at ±50-sample tolerance. Iterate predicted peaks in descending
-      order of heatmap confidence; each predicted peak claims its
-      closest **unmatched** reference within tolerance, or counts as a
-      false positive if none exists. Remaining unclaimed references
-      are false negatives.
+   d. Match predicted peaks to references with **optimal 1:1 assignment**
+      via `scipy.optimize.linear_sum_assignment` on the pairwise
+      absolute-distance matrix. Out-of-tolerance pairs are blocked with
+      a large-cost entry so Hungarian avoids them unless forced.
+      Post-assignment, any match whose distance exceeds ±50 samples is
+      dropped (becomes one FP + one FN). Sketch:
+
+      ```python
+      from scipy.optimize import linear_sum_assignment
+      dist = np.abs(pred_positions[:, None] - ref_positions[None, :])
+      cost = np.where(dist <= tolerance, dist, 1e9)
+      row_ind, col_ind = linear_sum_assignment(cost)
+      matches = [(r, c) for r, c in zip(row_ind, col_ind)
+                 if dist[r, c] <= tolerance]
+      ```
 3. Aggregate: per-molecule TP / FP / FN, compute precision / recall /
    F1 per molecule, then mean + median across molecules. Per-run
    breakdown for multi-run evaluation.
+
+**Note on matching semantics:** Hungarian gives the optimal 1:1
+assignment minimizing total distance. Standard object-detection F1
+(COCO/VOC) uses **greedy-by-confidence** matching instead. Numbers
+from our evaluator will therefore not be directly comparable to
+published benchmarks, but are internally consistent for comparing our
+own models — which is all this 48-h window needs. Flagged here so we
+don't surprise ourselves later.
 
 **Output:** JSON with `{ "overall": {...}, "per_run": {...}, "per_molecule": [...] }`
 plus a stdout summary table.
@@ -149,7 +174,11 @@ plus a stdout summary table.
 **Unit tests:** synthetic waveform with known peaks, assert matching
 logic handles: perfect match, off-by-25-samples match, off-by-100-sample
 miss, extra predicted peak (FP), missing predicted peak (FN), two
-predicted peaks near one reference (one TP + one FP).
+predicted peaks near one reference (one TP + one FP), and the trickier
+case where greedy would pick suboptimally but Hungarian picks optimally.
+
+**New dev dependency:** `scipy` added to `[project.optional-dependencies].dev`
+in `pyproject.toml`.
 
 ### 4.2 `scripts/visualize_predictions.py`
 
@@ -177,7 +206,8 @@ non-empty PNG file.
 
 | Phase | Work | Est. wall | GPU |
 |-------|------|-----------|-----|
-| 1 | Code: loss changes + evaluate_peak_match + visualize_predictions + tests | 3 h | no |
+| 1 | Code: loss changes + evaluate_peak_match + visualize_predictions + overfit_one_batch + tests | 3 h | no |
+| 1.5 | **Overfit-one-batch gate** (see below) | 10-15 min | yes |
 | 2a | Smoke: new recipe, 10 epochs, single-run cache | 4 h | yes |
 | 2b | Evaluate + visualize run 2a; decide go/tune | 0.5 h | brief |
 | 2c | (Conditional) smoke run 2 with one adjustment | 4 h | yes |
@@ -188,7 +218,34 @@ non-empty PNG file.
 | 7 | Evaluate multi-run model on 3 held-out test runs + viz | 1 h | brief |
 | 8 | Write summary (what worked / what didn't, F1 numbers, viz links) | 0.5 h | no |
 
-**Cumulative:** ~44-49 h, with 2-4 h of explicit slack.
+**Cumulative:** ~45-49 h, with 2-4 h of explicit slack.
+
+### Phase 1.5 — Overfit-One-Batch Gate
+
+Before committing to a 4-hour smoke run, verify the recipe is structurally
+healthy with a standard ML sanity check: **can the model memorize a single
+batch?** If structural issues remain, this fails in minutes instead of
+wasting 4 hours.
+
+**Script:** `scripts/overfit_one_batch.py`
+- Loads one batch of 32 molecules from the single-run cache (fixed seed).
+- No data augmentation.
+- Fresh model, fresh optimizer, `warmstart_epochs=0` so we're training
+  on the full loss immediately.
+- Loop 300 gradient steps on that same batch.
+- After every 50 steps: print raw losses, print scaled losses, and dump
+  one visualization frame for the first molecule in the batch.
+
+**Pass criteria (all four required to advance to Phase 2a):**
+1. `bp_loss / scale_bp` drops below 0.1 by step 300 (started at ~1.0).
+2. `probe_loss` drops below 0.1 by step 300.
+3. No NaN / Inf at any step.
+4. Visualization at step 300 shows sharp peaks aligned with reference
+   positions on the first molecule.
+
+**Fail behavior:** stop and report which criterion failed. Iterate on
+code before advancing. Burning 5 more minutes on this gate is vastly
+cheaper than burning 4 hours on Phase 2a with a broken recipe.
 
 ### Test Holdout Policy (Multi-Run)
 
@@ -241,19 +298,22 @@ points:
 
 ## 6. Risks and Mitigations
 
-**Risk 1: The loss-scale normalization EMA oscillates and never stabilizes.**
-Mitigation: log per-epoch EMA values in the training summary. If we see
-wild swings, fall back to static `lambda` overrides (Approach 2-moderate
-from the brainstorm) as a Phase 2c adjustment.
+**Risk 1: Static scale divisors are wrong for this data distribution.**
+The divisors (`bp=30000`, `vel=5000`, `count=1`, `probe=1`) are chosen
+from tonight's observed values. If early training or a different run
+produces materially different magnitudes, the balance will be off.
+Mitigation: Phase 1.5's overfit-one-batch run prints raw magnitudes;
+Phase 2a's first epoch prints them in the training log. If after
+Phase 2a the scaled losses are not within an order of magnitude of
+each other, adjust divisors in Phase 2b and rerun.
 
 **Risk 2: Phase 4 recipe works for 55k single-run but doesn't scale to
-1.5M multi-run.** Could happen if the loss scales learned on single-run
-don't match multi-run statistics (different runs have different peak
-densities, velocities, etc.). Mitigation: the running-mean
-normalization re-stabilizes on new data; the first batch of Phase 6
-will be used to reset the EMA. Also, Phase 2c or Phase 4 can
-include a quick sanity check where we run forward on molecules from a
-different color run and confirm the loss magnitudes are similar.
+1.5M multi-run.** Different runs have different peak densities,
+velocities, and waveform statistics; raw loss magnitudes may shift.
+Mitigation: before launching Phase 6, run one forward pass on a batch
+from each color and confirm raw magnitudes are comparable to the
+single-run values. Adjust divisors if needed before starting the long
+multi-run training.
 
 **Risk 3: Multi-run preprocessing hits a snag on one of the other 29
 runs (missing file, TDB parse failure).** Tonight's preprocess worked
