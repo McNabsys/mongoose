@@ -72,10 +72,19 @@ class CombinedLoss:
         self.tag_width_bp = tag_width_bp
         self.sample_period_ms = sample_period_ms
         self.min_blend = float(min_blend)
-        self.scale_probe = max(float(scale_probe), 1e-6)
-        self.scale_bp = max(float(scale_bp), 1e-6)
-        self.scale_vel = max(float(scale_vel), 1e-6)
-        self.scale_count = max(float(scale_count), 1e-6)
+        for name, val in (
+            ("scale_probe", scale_probe),
+            ("scale_bp", scale_bp),
+            ("scale_vel", scale_vel),
+            ("scale_count", scale_count),
+        ):
+            fval = float(val)
+            if fval <= 0.0:
+                raise ValueError(
+                    f"{name} must be positive, got {fval!r}. "
+                    "Pass a measured typical magnitude, e.g. scale_bp=30000.0."
+                )
+            setattr(self, name, fval)
 
         # Current effective lambdas and warmstart blend (updated by set_epoch).
         self.current_lambda_bp: float = 0.0

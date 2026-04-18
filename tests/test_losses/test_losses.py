@@ -420,13 +420,18 @@ def test_combined_loss_scale_divisors_normalize_components(minimal_batch):
     _, details_plain = plain(**kwargs)
     _, details_scaled = scaled(**kwargs)
 
-    # After the change, details should expose BOTH scaled (under
-    # existing keys "probe"/"bp"/"vel"/"count") AND raw values under new
-    # "*_raw" keys. Cross-check both sides.
+    # After the change, details should expose BOTH scaled and *_raw keys.
     assert details_scaled["probe_raw"] == details_plain["probe_raw"]
     assert details_scaled["bp_raw"] == details_plain["bp_raw"]
-    assert abs(details_scaled["bp"] - details_plain["bp_raw"] / 100.0) < 1e-5
-    # Use relative tolerance for vel since raw values can reach ~10^4 in float32
-    assert abs(details_scaled["vel"] - details_plain["vel_raw"] / 10.0) < 1e-4
-    assert abs(details_scaled["count"] - details_plain["count_raw"] / 1.0) < 1e-5
-    assert abs(details_scaled["probe"] - details_plain["probe_raw"] / 1.0) < 1e-5
+    assert details_scaled["bp"] == pytest.approx(details_plain["bp_raw"] / 100.0, rel=1e-5)
+    assert details_scaled["vel"] == pytest.approx(details_plain["vel_raw"] / 10.0, rel=1e-5)
+    assert details_scaled["count"] == pytest.approx(details_plain["count_raw"] / 1.0, rel=1e-5)
+    assert details_scaled["probe"] == pytest.approx(details_plain["probe_raw"] / 1.0, rel=1e-5)
+
+
+def test_combined_loss_scale_divisor_rejects_non_positive():
+    """Non-positive scale divisors are a configuration error — fail loudly."""
+    with pytest.raises(ValueError, match="scale_bp must be positive"):
+        CombinedLoss(scale_bp=0.0)
+    with pytest.raises(ValueError, match="scale_vel must be positive"):
+        CombinedLoss(scale_vel=-1.0)
