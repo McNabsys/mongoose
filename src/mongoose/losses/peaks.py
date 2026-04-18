@@ -7,6 +7,7 @@ the indexing operation, not through the extraction itself.
 """
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 from mongoose.inference.nms import velocity_adaptive_nms
@@ -61,34 +62,54 @@ def measure_peak_widths_samples(
     Returns:
         FloatTensor of widths in samples, one per peak.
     """
-    heatmap_det = heatmap.detach()
-    n = int(heatmap_det.shape[0])
     k = int(peak_indices.numel())
     if k == 0:
         return torch.zeros(0, dtype=torch.float32, device=heatmap.device)
 
-    widths = torch.empty(k, dtype=torch.float32, device=heatmap.device)
+    # Numpy per-peak with a vectorized boundary search: walks on early-training
+    # heatmaps can span thousands of samples per peak, so a Python while-loop
+    # (even on numpy scalars) is far too slow. Finding the first below-cutoff
+    # sample via argmax on a boolean slice is a single C-level scan per side.
+    hm = heatmap.detach().cpu().numpy()
+    pk = peak_indices.detach().cpu().numpy()
+    n = hm.shape[0]
+
+    widths_np = np.empty(k, dtype=np.float32)
     for i in range(k):
-        p = int(peak_indices[i].item())
+        p = int(pk[i])
         if p < 0 or p >= n:
-            widths[i] = 1.0
+            widths_np[i] = 1.0
             continue
-        peak_value = float(heatmap_det[p].item())
-        cutoff = peak_value * float(threshold_frac)
+        cutoff = float(hm[p]) * float(threshold_frac)
 
-        # Walk left
-        left = p
-        while left - 1 >= 0 and float(heatmap_det[left - 1].item()) >= cutoff:
-            left -= 1
+        # Left walk: count contiguous samples in hm[0:p] that are >= cutoff,
+        # starting from p-1 and going downward.
+        if p == 0:
+            walk_left = 0
+        else:
+            left_slice = hm[:p]
+            # Reverse so argmax finds the first below-cutoff sample walking
+            # outward from the peak.
+            below_reversed = left_slice[::-1] < cutoff
+            if below_reversed.any():
+                walk_left = int(below_reversed.argmax())
+            else:
+                walk_left = p
 
-        # Walk right
-        right = p
-        while right + 1 < n and float(heatmap_det[right + 1].item()) >= cutoff:
-            right += 1
+        # Right walk: count contiguous samples in hm[p+1:n] that are >= cutoff.
+        if p >= n - 1:
+            walk_right = 0
+        else:
+            right_slice = hm[p + 1:]
+            below = right_slice < cutoff
+            if below.any():
+                walk_right = int(below.argmax())
+            else:
+                walk_right = n - p - 1
 
-        width = float(right - left + 1)
+        width = float(walk_left + walk_right + 1)
         if width < 1.0:
             width = 1.0
-        widths[i] = width
+        widths_np[i] = width
 
-    return widths
+    return torch.from_numpy(widths_np).to(heatmap.device)

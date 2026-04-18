@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import bisect
+
+import numpy as np
 import torch
 
 
@@ -26,42 +29,45 @@ def velocity_adaptive_nms(
     Returns:
         1D tensor of peak sample indices (sorted ascending).
     """
-    # Step 1: Find all indices where heatmap >= threshold
-    candidates = torch.nonzero(heatmap >= threshold, as_tuple=False).squeeze(-1)
-    if candidates.numel() == 0:
+    # Work in numpy: the greedy NMS does tight per-candidate scalar access
+    # (heatmap[idx], velocity[idx], suppression check) that hits per-element
+    # overhead hard when routed through torch tensors.
+    hm_np = heatmap.detach().cpu().numpy() if heatmap.is_cuda else heatmap.detach().numpy()
+    vel_np = velocity.detach().cpu().numpy() if velocity.is_cuda else velocity.detach().numpy()
+
+    above = np.nonzero(hm_np >= threshold)[0]
+    if above.size == 0:
         return torch.tensor([], dtype=torch.long)
 
-    # Step 2: Sort candidates by heatmap value (descending, greedy NMS)
-    candidate_values = heatmap[candidates]
-    sorted_order = torch.argsort(candidate_values, descending=True)
-    candidates = candidates[sorted_order]
+    # Descending sort by heatmap value for greedy acceptance order.
+    order = np.argsort(-hm_np[above], kind="stable")
+    candidates = above[order]
 
-    # Step 3: Greedy NMS with velocity-adaptive separation
-    accepted: list[int] = []
-    for i in range(len(candidates)):
-        idx = candidates[i].item()
-        # Compute local min_separation
-        vel = velocity[idx].item()
+    # Greedy NMS. `accepted_sorted` is kept sorted by index so we can use
+    # bisect to test only the immediate left/right neighbors instead of
+    # scanning every accepted peak (O(N log K) vs. O(N*K)).
+    accepted_sorted: list[int] = []
+    for idx_np in candidates:
+        idx = int(idx_np)
+        vel = float(vel_np[idx])
         if vel <= 0:
-            vel = 1e-10  # avoid division by zero
+            vel = 1e-10
         min_sep = max(8.0, tag_width_bp / vel * 0.5)
 
-        # Check if any already-accepted peak is within min_separation
+        pos = bisect.bisect_left(accepted_sorted, idx)
         suppressed = False
-        for accepted_idx in accepted:
-            if abs(idx - accepted_idx) < min_sep:
-                suppressed = True
-                break
+        if pos > 0 and idx - accepted_sorted[pos - 1] < min_sep:
+            suppressed = True
+        elif pos < len(accepted_sorted) and accepted_sorted[pos] - idx < min_sep:
+            suppressed = True
 
         if not suppressed:
-            accepted.append(idx)
+            accepted_sorted.insert(pos, idx)
 
-    if not accepted:
+    if not accepted_sorted:
         return torch.tensor([], dtype=torch.long)
 
-    # Step 4: Sort accepted peaks by index (ascending temporal order)
-    accepted.sort()
-    return torch.tensor(accepted, dtype=torch.long)
+    return torch.tensor(accepted_sorted, dtype=torch.long)
 
 
 def subsample_peak_position(heatmap: torch.Tensor, peak_idx: int) -> float:
