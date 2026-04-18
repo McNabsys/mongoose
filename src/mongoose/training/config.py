@@ -49,6 +49,11 @@ class TrainConfig:
     softdtw_gamma: float = 0.1
     peakiness_window: int = 20
     nms_threshold: float = 0.3
+    min_blend: float = 0.0
+    scale_probe: float = 1.0
+    scale_bp: float = 1.0
+    scale_vel: float = 1.0
+    scale_count: float = 1.0
 
     # Checkpointing
     checkpoint_dir: Path = Path("checkpoints")

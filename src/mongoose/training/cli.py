@@ -92,6 +92,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override number of synthetic molecules (only with --synthetic)",
     )
+    parser.add_argument(
+        "--min-blend",
+        type=float,
+        default=None,
+        help="Floor for the focal-vs-peakiness blend; 0.1 keeps focal supervision on forever.",
+    )
+    parser.add_argument(
+        "--scale-bp",
+        type=float,
+        default=None,
+        help="Divisor applied to raw bp_loss for per-component gradient balance.",
+    )
+    parser.add_argument("--scale-vel", type=float, default=None)
+    parser.add_argument("--scale-count", type=float, default=None)
+    parser.add_argument("--scale-probe", type=float, default=None)
     return parser
 
 
@@ -142,6 +157,16 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         config.warmstart_fade_epochs = args.warmstart_fade_epochs
     if args.synthetic_num_molecules is not None:
         config.synthetic_num_molecules = args.synthetic_num_molecules
+    if args.min_blend is not None:
+        config.min_blend = args.min_blend
+    if args.scale_bp is not None:
+        config.scale_bp = args.scale_bp
+    if args.scale_vel is not None:
+        config.scale_vel = args.scale_vel
+    if args.scale_count is not None:
+        config.scale_count = args.scale_count
+    if args.scale_probe is not None:
+        config.scale_probe = args.scale_probe
 
     return config
 

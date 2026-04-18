@@ -44,6 +44,11 @@ class Trainer:
             softdtw_gamma=config.softdtw_gamma,
             peakiness_window=config.peakiness_window,
             nms_threshold=config.nms_threshold,
+            min_blend=config.min_blend,
+            scale_probe=config.scale_probe,
+            scale_bp=config.scale_bp,
+            scale_vel=config.scale_vel,
+            scale_count=config.scale_count,
         )
 
         # Optimizer
