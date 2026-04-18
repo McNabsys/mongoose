@@ -109,7 +109,7 @@ def run_inference(
 
     # Step 1: Forward pass
     with torch.no_grad():
-        probe_heatmap, cumulative_bp, raw_velocity = model(waveform, conditioning, mask)
+        probe_heatmap, cumulative_bp, raw_velocity, _logits = model(waveform, conditioning, mask)
 
     # Work with single-molecule tensors (remove batch dim)
     heatmap_1d = probe_heatmap[0].cpu()  # [T]

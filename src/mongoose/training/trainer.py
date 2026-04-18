@@ -287,12 +287,12 @@ class Trainer:
             dtype=torch.bfloat16,
             enabled=self.config.use_amp and self.device.type == "cuda",
         ):
-            probe_heatmap, cumulative_bp, raw_velocity = self.model(
+            probe_heatmap, cumulative_bp, raw_velocity, probe_logits = self.model(
                 waveform, conditioning, mask
             )
 
-        # Loss runs in fp32: focal_loss' eps clamp and soft_dtw's squared cost
-        # matrix are not safe in fp16/bf16 mantissa precision or range.
+        # Loss runs in fp32: probe BCE's numeric stability, focal_loss eps
+        # clamp, and soft_dtw's squared cost matrix all need fp32.
         with torch.amp.autocast("cuda", enabled=False):
             loss, details = self.criterion(
                 pred_heatmap=probe_heatmap.float(),
@@ -303,6 +303,7 @@ class Trainer:
                 warmstart_heatmap=warmstart_heatmap,
                 warmstart_valid=warmstart_valid,
                 mask=mask,
+                pred_heatmap_logits=probe_logits.float(),
             )
 
         return loss, details

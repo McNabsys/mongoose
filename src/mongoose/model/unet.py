@@ -168,8 +168,8 @@ class T2DUNet(nn.Module):
         # h is now [B, 32, T_padded]
 
         # --- Probe head ---
-        probe = self.probe_head(h)  # [B, 1, T_padded]
-        probe = torch.sigmoid(probe).squeeze(1)  # [B, T_padded]
+        probe_logits = self.probe_head(h).squeeze(1)  # [B, T_padded], raw logits
+        probe = torch.sigmoid(probe_logits)  # [B, T_padded], probabilities
 
         # --- Velocity head ---
         vel = self.velocity_head(h)  # [B, 1, T_padded]
@@ -181,7 +181,8 @@ class T2DUNet(nn.Module):
 
         # --- Trim to original length ---
         probe = probe[:, :T_orig]
+        probe_logits = probe_logits[:, :T_orig]
         cumulative_bp = cumulative_bp[:, :T_orig]
         raw_velocity = raw_velocity[:, :T_orig]
 
-        return probe, cumulative_bp, raw_velocity
+        return probe, cumulative_bp, raw_velocity, probe_logits

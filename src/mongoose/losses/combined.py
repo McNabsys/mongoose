@@ -2,8 +2,11 @@
 
 Composes four components per molecule:
 
-- ``L_probe``: focal loss on wfmproc Gaussians during warmstart, fading into
-  the peakiness regularizer after warmstart ends.
+- ``L_probe``: masked MSE against wfmproc Gaussian target during warmstart,
+  fading into the peakiness regularizer after warmstart ends. MSE replaced
+  focal loss after the latter produced degenerate flat-heatmap minima —
+  focal's alpha=0.25 weight on positives and averaging over padded length
+  diluted the sparse peak signal.
 - ``L_bp``: soft-DTW between model-detected peaks in cumulative bp and the
   reference bp positions, zero-anchored and span-normalized.
 - ``L_velocity``: MSE at detected peak positions with targets derived from
@@ -21,7 +24,6 @@ import torch
 import torch.nn.functional as F
 
 from mongoose.losses.count import count_loss, peakiness_regularizer
-from mongoose.losses.focal import focal_loss
 from mongoose.losses.peaks import extract_peak_indices, measure_peak_widths_samples
 from mongoose.losses.softdtw import soft_dtw
 
@@ -56,6 +58,7 @@ class CombinedLoss:
         scale_bp: float = 1.0,
         scale_vel: float = 1.0,
         scale_count: float = 1.0,
+        probe_pos_weight: float = 0.0,
     ) -> None:
         self.lambda_bp = lambda_bp
         self.lambda_vel = lambda_vel
@@ -72,6 +75,7 @@ class CombinedLoss:
         self.tag_width_bp = tag_width_bp
         self.sample_period_ms = sample_period_ms
         self.min_blend = float(min_blend)
+        self.probe_pos_weight = float(probe_pos_weight)
         for name, val in (
             ("scale_probe", scale_probe),
             ("scale_bp", scale_bp),
@@ -140,6 +144,7 @@ class CombinedLoss:
         warmstart_heatmap: torch.Tensor | None,
         warmstart_valid: torch.Tensor | None,
         mask: torch.Tensor,
+        pred_heatmap_logits: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Compute combined loss for a batch.
 
@@ -151,7 +156,12 @@ class CombinedLoss:
                 the ordered reference bp coordinates for each molecule.
             n_ref_probes: [B] int tensor with the number of reference probes.
             warmstart_heatmap: [B, T] float tensor (pre-built Gaussians), or
-                ``None`` to skip focal supervision.
+                ``None`` to skip the probe supervision term.
+            pred_heatmap_logits: Optional [B, T] raw logits. When provided,
+                the probe term uses ``BCEWithLogitsLoss`` for numerical
+                stability under saturated sigmoid outputs. Without it, the
+                probe term falls back to positive-weighted MSE on the
+                sigmoid-activated heatmap (less stable once outputs saturate).
             warmstart_valid: [B] bool tensor flagging which molecules have
                 valid warmstart labels, or ``None``.
             mask: [B, T] boolean mask for valid (non-padded) samples.
@@ -184,14 +194,29 @@ class CombinedLoss:
                 and warmstart_valid is not None
                 and bool(warmstart_valid[b].item())
             ):
-                focal = focal_loss(
-                    pred_h_b,
-                    warmstart_heatmap[b].to(pred_h_b.dtype),
-                    gamma=self.focal_gamma,
-                    alpha=self.focal_alpha,
-                    mask=mask_b,
-                )
-                probe_component = probe_component + blend * focal
+                mask_f_b = mask_b.to(pred_h_b.dtype)
+                target_b = warmstart_heatmap[b].to(pred_h_b.dtype)
+                weight_b = 1.0 + self.probe_pos_weight * target_b
+
+                if pred_heatmap_logits is not None:
+                    # BCE-with-logits against the soft Gaussian target.
+                    # Stable under saturated sigmoid outputs (a failure
+                    # mode that killed pure-MSE training: once logits
+                    # dropped below ~-6, sigmoid gradient vanished).
+                    logits_b = pred_heatmap_logits[b]
+                    bce_elem = F.binary_cross_entropy_with_logits(
+                        logits_b, target_b, reduction="none"
+                    )
+                    weighted_err = bce_elem * weight_b * mask_f_b
+                else:
+                    # Fallback: positive-weighted MSE on post-sigmoid
+                    # probabilities. Retained for backward compat.
+                    sq_err = (pred_h_b - target_b) ** 2
+                    weighted_err = sq_err * weight_b * mask_f_b
+
+                denom = (weight_b * mask_f_b).sum().clamp(min=1.0)
+                probe_loss_val = weighted_err.sum() / denom
+                probe_component = probe_component + blend * probe_loss_val
 
             if blend < 1.0:
                 masked_heatmap = pred_h_b * mask_b.to(pred_h_b.dtype)

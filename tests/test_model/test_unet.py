@@ -8,7 +8,7 @@ def test_forward_shapes():
     x = torch.randn(B, 1, T)
     cond = torch.randn(B, 6)
     mask = torch.ones(B, T, dtype=torch.bool)
-    probe_heatmap, cumulative_bp, raw_velocity = model(x, cond, mask)
+    probe_heatmap, cumulative_bp, raw_velocity, _logits = model(x, cond, mask)
     assert probe_heatmap.shape == (B, T)
     assert cumulative_bp.shape == (B, T)
     assert raw_velocity.shape == (B, T)
@@ -19,7 +19,7 @@ def test_cumulative_bp_monotonic():
     x = torch.randn(1, 1, 2048)
     cond = torch.randn(1, 6)
     mask = torch.ones(1, 2048, dtype=torch.bool)
-    _, cumulative_bp, _ = model(x, cond, mask)
+    _, cumulative_bp, _, _ = model(x, cond, mask)
     diffs = torch.diff(cumulative_bp, dim=-1)
     assert (diffs >= 0).all()
 
@@ -29,7 +29,7 @@ def test_probe_heatmap_range():
     x = torch.randn(1, 1, 2048)
     cond = torch.randn(1, 6)
     mask = torch.ones(1, 2048, dtype=torch.bool)
-    probe_heatmap, _, _ = model(x, cond, mask)
+    probe_heatmap, _, _, _ = model(x, cond, mask)
     assert (probe_heatmap >= 0).all()
     assert (probe_heatmap <= 1).all()
 
@@ -39,7 +39,7 @@ def test_velocity_strictly_positive():
     x = torch.randn(1, 1, 2048)
     cond = torch.randn(1, 6)
     mask = torch.ones(1, 2048, dtype=torch.bool)
-    _, _, raw_velocity = model(x, cond, mask)
+    _, _, raw_velocity, _ = model(x, cond, mask)
     assert (raw_velocity > 0).all()
 
 
@@ -49,7 +49,7 @@ def test_padding_mask_zeroes_velocity():
     cond = torch.randn(1, 6)
     mask = torch.ones(1, 2048, dtype=torch.bool)
     mask[0, 1536:] = False
-    _, cumulative_bp, _ = model(x, cond, mask)
+    _, cumulative_bp, _, _ = model(x, cond, mask)
     # In padded region, cumulative BP should be flat
     masked_vals = cumulative_bp[0, 1536:]
     assert torch.allclose(masked_vals, masked_vals[0:1].expand_as(masked_vals), atol=1e-6)
@@ -61,7 +61,7 @@ def test_variable_lengths():
         x = torch.randn(1, 1, T)
         cond = torch.randn(1, 6)
         mask = torch.ones(1, T, dtype=torch.bool)
-        probe_heatmap, cumulative_bp, raw_velocity = model(x, cond, mask)
+        probe_heatmap, cumulative_bp, raw_velocity, _logits = model(x, cond, mask)
         assert probe_heatmap.shape == (1, T)
         assert cumulative_bp.shape == (1, T)
 
@@ -72,7 +72,7 @@ def test_gradient_flows():
     x = torch.randn(1, 1, 1024, requires_grad=True)
     cond = torch.randn(1, 6)
     mask = torch.ones(1, 1024, dtype=torch.bool)
-    probe_heatmap, cumulative_bp, _ = model(x, cond, mask)
+    probe_heatmap, cumulative_bp, _, _ = model(x, cond, mask)
     loss = probe_heatmap.sum() + cumulative_bp.sum()
     loss.backward()
     assert x.grad is not None

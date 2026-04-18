@@ -91,7 +91,7 @@ def main() -> None:
                 with torch.amp.autocast(
                     "cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"
                 ):
-                    probe_heatmap, _, raw_velocity = model(waveform, conditioning, mask)
+                    probe_heatmap, _, raw_velocity, _logits = model(waveform, conditioning, mask)
                 probe_heatmap = probe_heatmap.float()
                 raw_velocity = raw_velocity.float()
 

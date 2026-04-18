@@ -41,6 +41,16 @@ def main() -> None:
     parser.add_argument("--scale-count", type=float, default=1.0)
     parser.add_argument("--scale-probe", type=float, default=1.0)
     parser.add_argument("--min-blend", type=float, default=0.1)
+    parser.add_argument("--warmstart-epochs", type=int, default=0,
+                        help="Warmstart epochs; with steps << epoch length, the whole run stays in warmstart if >0.")
+    parser.add_argument("--warmstart-fade-epochs", type=int, default=0)
+    parser.add_argument("--lambda-bp", type=float, default=1.0)
+    parser.add_argument("--lambda-vel", type=float, default=1.0)
+    parser.add_argument("--lambda-count", type=float, default=1.0)
+    parser.add_argument("--nms-threshold", type=float, default=0.3,
+                        help="Training-time NMS threshold inside CombinedLoss. Lower=more candidate peaks for bp gradient.")
+    parser.add_argument("--probe-pos-weight", type=float, default=0.0,
+                        help="Positive-sample emphasis in probe MSE. weight=1+pos_weight*target. Counters sparse-target class imbalance.")
     parser.add_argument("--output-viz", type=Path, default=Path("overfit_gate_viz.png"))
     args = parser.parse_args()
 
@@ -75,13 +85,18 @@ def main() -> None:
     model.train()
 
     criterion = CombinedLoss(
-        warmstart_epochs=0,  # No warmstart schedule; go straight to real target.
-        warmstart_fade_epochs=0,
+        lambda_bp=args.lambda_bp,
+        lambda_vel=args.lambda_vel,
+        lambda_count=args.lambda_count,
+        warmstart_epochs=args.warmstart_epochs,
+        warmstart_fade_epochs=args.warmstart_fade_epochs,
+        nms_threshold=args.nms_threshold,
         min_blend=args.min_blend,
         scale_probe=args.scale_probe,
         scale_bp=args.scale_bp,
         scale_vel=args.scale_vel,
         scale_count=args.scale_count,
+        probe_pos_weight=args.probe_pos_weight,
     )
     criterion.set_epoch(0)
 
@@ -92,7 +107,7 @@ def main() -> None:
         with torch.amp.autocast(
             "cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"
         ):
-            probe_heatmap, cumulative_bp, raw_velocity = model(
+            probe_heatmap, cumulative_bp, raw_velocity, probe_logits = model(
                 waveform, conditioning, mask
             )
         with torch.amp.autocast("cuda", enabled=False):
@@ -105,6 +120,7 @@ def main() -> None:
                 warmstart_heatmap=warmstart_heatmap,
                 warmstart_valid=warmstart_valid,
                 mask=mask,
+                pred_heatmap_logits=probe_logits.float(),
             )
 
         if not math.isfinite(loss.item()):
@@ -129,7 +145,7 @@ def main() -> None:
         with torch.amp.autocast(
             "cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"
         ):
-            heatmap, _, velocity = model(waveform, conditioning, mask)
+            heatmap, _, velocity, _logits = model(waveform, conditioning, mask)
         h0 = heatmap[0].float().cpu().numpy()
         v0 = velocity[0].float()
         pred_idx = extract_peak_indices(
