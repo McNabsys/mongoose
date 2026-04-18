@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -31,9 +32,8 @@ from mongoose.model.unet import T2DUNet
 
 
 def _run_id_for_cache(cache_dir: Path) -> str:
-    import json as _json
     with open(cache_dir / "manifest.json") as f:
-        manifest = _json.load(f)
+        manifest = json.load(f)
     return str(manifest["run_id"])
 
 
@@ -44,7 +44,7 @@ def main() -> None:
                         help="Repeat for multiple caches.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-molecules", type=int, default=None,
-                        help="Cap per-cache molecule count (debug).")
+                        help="Cap molecules processed per cache (exact count).")
     parser.add_argument("--tolerance", type=float, default=50.0)
     parser.add_argument("--threshold", type=float, default=0.3,
                         help="Peak-extraction confidence threshold.")
@@ -52,6 +52,8 @@ def main() -> None:
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # weights_only=False required because our checkpoints include a TrainConfig
+    # dataclass, not just raw tensors. We trust our own checkpoint files.
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     config = ckpt["config"]
 
@@ -77,13 +79,10 @@ def main() -> None:
         )
 
         run_tp = run_fp = run_fn = 0
+        run_skipped = 0
         run_per_mol: list[dict[str, Any]] = []
 
         for batch_idx, batch in enumerate(loader):
-            if args.max_molecules is not None:
-                if batch_idx * args.batch_size >= args.max_molecules:
-                    break
-
             waveform = batch["waveform"].to(device)
             conditioning = batch["conditioning"].to(device)
             mask = batch["mask"].to(device)
@@ -98,6 +97,11 @@ def main() -> None:
 
             b = waveform.shape[0]
             for i in range(b):
+                # Per-item max-molecules cap (exact count).
+                global_idx = batch_idx * args.batch_size + i
+                if args.max_molecules is not None and global_idx >= args.max_molecules:
+                    break  # stop processing more molecules in this batch
+
                 h = probe_heatmap[i]
                 v = raw_velocity[i]
                 m = mask[i]
@@ -108,18 +112,13 @@ def main() -> None:
                 )
                 pred_np = pred_idx.detach().cpu().numpy().astype(np.int64)
 
-                # Reference peaks: wfmproc centers stored in the cached
-                # gt dict, accessed via the underlying dataset.
-                global_idx = batch_idx * args.batch_size + i
-                if global_idx >= len(dataset):
-                    break
-                dir_idx, mol_idx = dataset.entries[global_idx]
-                gt = dataset.gt_lists[dir_idx][mol_idx]
-                centers = gt.get("warmstart_probe_centers_samples")
-                if centers is None:
-                    # Skip molecules with no wfmproc ground truth.
+                # Reference peaks come through the batch dict directly,
+                # avoiding fragile dataset re-indexing.
+                centers_tensor = batch["warmstart_probe_centers_samples"][i]
+                if centers_tensor is None:
+                    run_skipped += 1
                     continue
-                ref_np = np.asarray(centers, dtype=np.int64)
+                ref_np = centers_tensor.detach().cpu().numpy().astype(np.int64)
 
                 matches, fps, fns = match_peaks(
                     pred_np, ref_np, tolerance=args.tolerance
@@ -138,17 +137,27 @@ def main() -> None:
                 run_per_mol.append(row)
                 per_molecule.append(row)
 
+        if run_skipped > 0:
+            print(
+                f"  WARNING: skipped {run_skipped} molecules in run {run_id}"
+                " (no wfmproc ground truth)",
+                file=sys.stderr,
+            )
+
         overall_tp += run_tp; overall_fp += run_fp; overall_fn += run_fn
         per_run[run_id] = {
             "tp": run_tp, "fp": run_fp, "fn": run_fn,
             **compute_metrics(tp=run_tp, fp=run_fp, fn=run_fn),
+            "n_skipped": run_skipped,
             "per_molecule_mean": aggregate_per_molecule_metrics(run_per_mol),
         }
 
+    overall_skipped = sum(v["n_skipped"] for v in per_run.values())
     summary = {
         "overall": {
             "tp": overall_tp, "fp": overall_fp, "fn": overall_fn,
             **compute_metrics(tp=overall_tp, fp=overall_fp, fn=overall_fn),
+            "n_skipped": overall_skipped,
             "per_molecule_mean": aggregate_per_molecule_metrics(per_molecule),
         },
         "per_run": per_run,

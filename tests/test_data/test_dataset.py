@@ -24,6 +24,10 @@ def _make_item(
         "n_ref_probes": torch.tensor(n_probes, dtype=torch.long),
         "warmstart_heatmap": torch.zeros(length) if with_warmstart else None,
         "warmstart_valid": torch.tensor(with_warmstart, dtype=torch.bool),
+        "warmstart_probe_centers_samples": (
+            torch.arange(n_probes, dtype=torch.long) * (length // max(n_probes, 1))
+            if with_warmstart else None
+        ),
         "molecule_uid": molecule_uid,
     }
     return item

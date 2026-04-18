@@ -89,6 +89,13 @@ def collate_molecules(items: list[dict]) -> dict:
         item["reference_bp_positions"] for item in items
     ]
 
+    # Per-molecule center lists have variable lengths, so keep as a list
+    # (same pattern as reference_bp_positions). Each element is a
+    # LongTensor or None.
+    warmstart_probe_centers_samples = [
+        item["warmstart_probe_centers_samples"] for item in items
+    ]
+
     return {
         "waveform": waveforms,
         "conditioning": conditioning,
@@ -97,5 +104,6 @@ def collate_molecules(items: list[dict]) -> dict:
         "n_ref_probes": n_ref_probes,
         "warmstart_heatmap": warmstart_heatmaps,
         "warmstart_valid": warmstart_valid,
+        "warmstart_probe_centers_samples": warmstart_probe_centers_samples,
         "molecule_uid": [item["molecule_uid"] for item in items],
     }

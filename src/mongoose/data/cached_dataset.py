@@ -145,6 +145,9 @@ class CachedMoleculeDataset(Dataset):
             warmstart_heatmap = None
             warmstart_valid = False
 
+        # Raw warmstart center positions for evaluator use; may be None.
+        raw_centers = warmstart_centers  # numpy array (int64) or None
+
         return {
             "waveform": torch.from_numpy(waveform).unsqueeze(0),  # [1, T]
             "conditioning": torch.from_numpy(conditioning),  # [6]
@@ -153,5 +156,9 @@ class CachedMoleculeDataset(Dataset):
             "n_ref_probes": torch.tensor(n_ref_probes, dtype=torch.long),
             "warmstart_heatmap": warmstart_heatmap,  # [T] or None
             "warmstart_valid": torch.tensor(warmstart_valid, dtype=torch.bool),
+            "warmstart_probe_centers_samples": (
+                torch.from_numpy(np.asarray(raw_centers, dtype=np.int64))
+                if raw_centers is not None else None
+            ),  # LongTensor[K] or None
             "molecule_uid": mol_info["uid"],
         }

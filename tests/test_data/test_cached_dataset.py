@@ -243,6 +243,45 @@ def test_cached_dataset_mask_all_true(fake_cache_dir):
     assert item["mask"].all()
 
 
+def test_cached_dataset_warmstart_centers_longtensor(fake_cache_dir):
+    """__getitem__ returns warmstart_probe_centers_samples as a LongTensor."""
+    ds = CachedMoleculeDataset([fake_cache_dir])
+    item = ds[0]
+
+    centers = item["warmstart_probe_centers_samples"]
+    assert centers is not None
+    assert isinstance(centers, torch.Tensor)
+    assert centers.dtype == torch.long
+    np.testing.assert_array_equal(centers.numpy(), [20, 50, 80])
+
+
+def test_cached_dataset_warmstart_centers_none(fake_cache_dir):
+    """__getitem__ returns None for warmstart_probe_centers_samples when absent."""
+    ds = CachedMoleculeDataset([fake_cache_dir])
+    item = ds[1]
+
+    assert item["warmstart_probe_centers_samples"] is None
+
+
+def test_collate_warmstart_centers_list(fake_cache_dir):
+    """collate_molecules passes warmstart_probe_centers_samples through as a list."""
+    from mongoose.data.collate import collate_molecules
+
+    ds = CachedMoleculeDataset([fake_cache_dir])
+    batch = collate_molecules([ds[0], ds[1]])
+
+    centers_list = batch["warmstart_probe_centers_samples"]
+    assert isinstance(centers_list, list)
+    assert len(centers_list) == 2
+    # First item has centers as LongTensor.
+    assert centers_list[0] is not None
+    assert isinstance(centers_list[0], torch.Tensor)
+    assert centers_list[0].dtype == torch.long
+    np.testing.assert_array_equal(centers_list[0].numpy(), [20, 50, 80])
+    # Second item has no centers.
+    assert centers_list[1] is None
+
+
 def test_cached_dataset_empty_dir(tmp_path):
     """Dataset with an empty cache dir (0 molecules) should have length 0."""
     cache_dir = tmp_path / "empty_run"

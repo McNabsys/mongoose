@@ -111,5 +111,9 @@ class SyntheticMoleculeDataset(Dataset):
             "n_ref_probes": torch.tensor(n_probes, dtype=torch.long),
             "warmstart_heatmap": warmstart_heatmap,  # [T] or None
             "warmstart_valid": torch.tensor(warmstart_valid, dtype=torch.bool),
+            "warmstart_probe_centers_samples": (
+                torch.from_numpy(probe_positions.astype(np.int64))
+                if warmstart_valid else None
+            ),  # LongTensor[K] or None
             "molecule_uid": idx,
         }
