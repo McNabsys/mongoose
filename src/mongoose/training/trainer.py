@@ -49,6 +49,7 @@ class Trainer:
             scale_bp=config.scale_bp,
             scale_vel=config.scale_vel,
             scale_count=config.scale_count,
+            probe_pos_weight=config.probe_pos_weight,
         )
 
         # Optimizer

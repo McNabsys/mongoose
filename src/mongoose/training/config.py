@@ -54,6 +54,7 @@ class TrainConfig:
     scale_bp: float = 1.0
     scale_vel: float = 1.0
     scale_count: float = 1.0
+    probe_pos_weight: float = 0.0
 
     # Checkpointing
     checkpoint_dir: Path = Path("checkpoints")

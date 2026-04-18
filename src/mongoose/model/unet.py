@@ -97,6 +97,15 @@ class T2DUNet(nn.Module):
             ResBlock(final_ch, self.KERNEL_SIZE),
             nn.Conv1d(final_ch, 1, 1),
         )
+        # Initialize probe_head's final-conv bias so the model outputs
+        # sigmoid(~-3) ~= 0.05 everywhere at init. This matches the
+        # approximate peak-sample fraction on a sparse Gaussian target and
+        # prevents the "1792 negatives pulling down from sigmoid=0.5" trap
+        # that dominates the first few hundred steps otherwise (standard
+        # sparse-detection init trick, e.g. RetinaNet focal-loss paper).
+        final_conv = self.probe_head[-1]
+        assert isinstance(final_conv, nn.Conv1d)
+        nn.init.constant_(final_conv.bias, -3.0)
 
         # --- Velocity head (wide kernels for smoothing) ---
         self.velocity_head = nn.Sequential(

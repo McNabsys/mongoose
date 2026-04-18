@@ -123,6 +123,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Divisor applied to raw probe_loss for per-component gradient balance.",
     )
     parser.add_argument(
+        "--probe-pos-weight",
+        type=float,
+        default=None,
+        help="Positive-sample emphasis in probe BCE-on-logits. weight=1+pos_weight*target.",
+    )
+    parser.add_argument(
         "--min-lr",
         type=float,
         default=None,
@@ -188,6 +194,8 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         config.scale_count = args.scale_count
     if args.scale_probe is not None:
         config.scale_probe = args.scale_probe
+    if args.probe_pos_weight is not None:
+        config.probe_pos_weight = args.probe_pos_weight
     if args.min_lr is not None:
         config.min_lr = args.min_lr
 
