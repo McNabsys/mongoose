@@ -49,7 +49,16 @@ def resolve_run_inputs(date_dir: Path, run_id: str) -> RunInputs:
         FileNotFoundError: If any required file is missing.
     """
     date_dir = Path(date_dir)
-    remapped_dir = date_dir / "Remapped" / "AllCh"
+    # The remap output dir has two observed spellings across runs —
+    # "Remapped" on some batches, "Remapping" on others. Contents are
+    # identical. Prefer "Remapped" if both exist; fall back to "Remapping".
+    for candidate in ("Remapped", "Remapping"):
+        candidate_dir = date_dir / candidate / "AllCh"
+        if candidate_dir.is_dir():
+            remapped_dir = candidate_dir
+            break
+    else:
+        remapped_dir = date_dir / "Remapped" / "AllCh"  # original path for error msg
 
     probes_bin = remapped_dir / f"{run_id}_probes.bin"
     assigns = remapped_dir / f"{run_id}_probes.txt_probeassignment.assigns"
