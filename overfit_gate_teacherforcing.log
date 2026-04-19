@@ -1,0 +1,9 @@
+step    1 | total=   9.65694 | probe=8.2347 bp=1.0680 vel=1.7766 count=0.0000 | raw_bp=320398.8 raw_vel=8882.9
+step   50 | total=   0.96446 | probe=0.2686 bp=0.7485 vel=0.6432 count=0.0000 | raw_bp=224562.4 raw_vel=3216.0
+step  100 | total=   0.58513 | probe=0.1035 bp=0.6327 vel=0.3306 count=0.0000 | raw_bp=189820.5 raw_vel=1653.0
+step  150 | total=   0.58653 | probe=0.1638 bp=0.5999 vel=0.2456 count=0.0000 | raw_bp=179981.2 raw_vel=1227.9
+step  200 | total=   0.91097 | probe=0.4857 bp=0.5116 vel=0.3390 count=0.0000 | raw_bp=153485.4 raw_vel=1694.9
+step  250 | total=   0.48749 | probe=0.1698 bp=0.4239 vel=0.2114 count=0.0000 | raw_bp=127165.7 raw_vel=1057.1
+step  300 | total=   0.63064 | probe=0.3447 bp=0.3724 vel=0.1995 count=0.0000 | raw_bp=111729.7 raw_vel=997.4
+
+Saved viz: overfit_gate_teacherforcing.png
