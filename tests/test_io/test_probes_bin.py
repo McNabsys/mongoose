@@ -52,3 +52,18 @@ def test_probe_attributes(sigproc_dir):
     # All probes on this clean molecule should be accepted
     for p in mol.probes:
         assert p.accepted
+
+
+def test_molecule_fixed_size_matches_actual_struct_layout():
+    """Sum of per-field struct sizes in the molecule record must equal the
+    documented MOLECULE_FIXED_SIZE constant.
+
+    Field sizes (from probes.bin V5 Table 3):
+      - 20 x uint32/int32/float (4 bytes)    = 80
+      - 1 x double (start_ms)                = 8
+      - 5 x bool (1 byte)                    = 5
+      Total                                  = 93
+    """
+    from mongoose.io.probes_bin import MOLECULE_FIXED_SIZE
+
+    assert MOLECULE_FIXED_SIZE == 93

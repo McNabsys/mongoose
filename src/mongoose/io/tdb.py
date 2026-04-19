@@ -158,9 +158,12 @@ def _read_molecule_block(f) -> TdbMolecule:
     # Molecule samples (int16)
     waveform = np.frombuffer(f.read(total_data_count * 2), dtype=np.int16).copy()
 
-    # Undocumented 4-byte field between waveform and MorphOpen data in
-    # real Nabsys v4 TDBs (not present in v4.6 spec Table 2). Appears to
-    # be a filter-output value; skipped because it is unused downstream.
+    # 4 bytes of apparently random content always present between the
+    # raw waveform and the MorphOpen length prefix, not documented in
+    # the V4.6 spec. Byte-level investigation across real TDB files
+    # confirms: morph_count consistently equals total_data_count, and
+    # block boundaries align with the index file under this skip. The
+    # field appears to be vestigial/unused; safe to discard.
     f.read(4)
 
     # MorphOpen
