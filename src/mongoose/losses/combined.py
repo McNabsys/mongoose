@@ -2,11 +2,12 @@
 
 Composes four components per molecule:
 
-- ``L_probe``: masked MSE against wfmproc Gaussian target during warmstart,
-  fading into the peakiness regularizer after warmstart ends. MSE replaced
-  focal loss after the latter produced degenerate flat-heatmap minima —
-  focal's alpha=0.25 weight on positives and averaging over padded length
-  diluted the sparse peak signal.
+- ``L_probe``: CenterNet-style focal loss against wfmproc Gaussian targets
+  during warmstart, blended with the peakiness regularizer after warmstart
+  ends. Positives are samples with target >= 0.99 (peak centers); negatives
+  in the Gaussian halo are down-weighted by ``(1 - target)**beta``. Normalized
+  per-molecule by ``num_positives`` to keep gradient strength independent of
+  sequence length.
 - ``L_bp``: soft-DTW between model-detected peaks in cumulative bp and the
   reference bp positions, zero-anchored and span-normalized.
 - ``L_velocity``: MSE at detected peak positions with targets derived from
@@ -23,6 +24,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from mongoose.losses.centernet_focal import centernet_focal_loss
 from mongoose.losses.count import count_loss, peakiness_regularizer
 from mongoose.losses.peaks import extract_peak_indices, measure_peak_widths_samples
 from mongoose.losses.softdtw import soft_dtw
@@ -45,8 +47,6 @@ class CombinedLoss:
         warmup_epochs: int = 5,
         warmstart_epochs: int = 5,
         warmstart_fade_epochs: int = 2,
-        focal_gamma: float = 2.0,
-        focal_alpha: float = 0.25,
         huber_delta_bp: float = 500.0,
         softdtw_gamma: float = 0.1,
         peakiness_window: int = 20,
@@ -58,7 +58,6 @@ class CombinedLoss:
         scale_bp: float = 1.0,
         scale_vel: float = 1.0,
         scale_count: float = 1.0,
-        probe_pos_weight: float = 0.0,
     ) -> None:
         self.lambda_bp = lambda_bp
         self.lambda_vel = lambda_vel
@@ -66,8 +65,6 @@ class CombinedLoss:
         self.warmup_epochs = warmup_epochs
         self.warmstart_epochs = warmstart_epochs
         self.warmstart_fade_epochs = warmstart_fade_epochs
-        self.focal_gamma = focal_gamma
-        self.focal_alpha = focal_alpha
         self.huber_delta_bp = huber_delta_bp
         self.softdtw_gamma = softdtw_gamma
         self.peakiness_window = peakiness_window
@@ -75,7 +72,6 @@ class CombinedLoss:
         self.tag_width_bp = tag_width_bp
         self.sample_period_ms = sample_period_ms
         self.min_blend = float(min_blend)
-        self.probe_pos_weight = float(probe_pos_weight)
         for name, val in (
             ("scale_probe", scale_probe),
             ("scale_bp", scale_bp),
@@ -194,28 +190,14 @@ class CombinedLoss:
                 and warmstart_valid is not None
                 and bool(warmstart_valid[b].item())
             ):
-                mask_f_b = mask_b.to(pred_h_b.dtype)
-                target_b = warmstart_heatmap[b].to(pred_h_b.dtype)
-                weight_b = 1.0 + self.probe_pos_weight * target_b
-
-                if pred_heatmap_logits is not None:
-                    # BCE-with-logits against the soft Gaussian target.
-                    # Stable under saturated sigmoid outputs (a failure
-                    # mode that killed pure-MSE training: once logits
-                    # dropped below ~-6, sigmoid gradient vanished).
-                    logits_b = pred_heatmap_logits[b]
-                    bce_elem = F.binary_cross_entropy_with_logits(
-                        logits_b, target_b, reduction="none"
+                if pred_heatmap_logits is None:
+                    raise ValueError(
+                        "CenterNet focal probe loss requires pred_heatmap_logits; "
+                        "the model forward must return logits."
                     )
-                    weighted_err = bce_elem * weight_b * mask_f_b
-                else:
-                    # Fallback: positive-weighted MSE on post-sigmoid
-                    # probabilities. Retained for backward compat.
-                    sq_err = (pred_h_b - target_b) ** 2
-                    weighted_err = sq_err * weight_b * mask_f_b
-
-                denom = (weight_b * mask_f_b).sum().clamp(min=1.0)
-                probe_loss_val = weighted_err.sum() / denom
+                logits_b = pred_heatmap_logits[b]
+                target_b = warmstart_heatmap[b]
+                probe_loss_val = centernet_focal_loss(logits_b, target_b, mask_b)
                 probe_component = probe_component + blend * probe_loss_val
 
             if blend < 1.0:

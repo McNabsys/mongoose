@@ -1,5 +1,6 @@
 """Loss functions for mongoose velocity prediction model."""
 
+from mongoose.losses.centernet_focal import centernet_focal_loss
 from mongoose.losses.combined import CombinedLoss
 from mongoose.losses.count import count_loss, peakiness_regularizer
 from mongoose.losses.focal import focal_loss
@@ -10,6 +11,7 @@ from mongoose.losses.velocity import sparse_velocity_loss
 
 __all__ = [
     "CombinedLoss",
+    "centernet_focal_loss",
     "count_loss",
     "extract_peak_indices",
     "focal_loss",
