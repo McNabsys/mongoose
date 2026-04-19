@@ -1,0 +1,3 @@
+Epoch 1/1 | loss=0.4169 | probe=0.2936 | bp=0.1169 | vel=0.1296 | count=0.0000 | val_loss=0.2567 | blend=1.000 | lr=0.000015 | raw[p=0.29 bp=35059 vel=648 count=6.42]
+  Saved checkpoint: micro_phase6_checkpoints\checkpoint_epoch_000.pt
+  Saved best model: micro_phase6_checkpoints\best_model.pt (val_loss=0.2567)
