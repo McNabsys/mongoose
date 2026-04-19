@@ -93,3 +93,58 @@ def test_current_view_changes_after_advance():
     loader.advance(1)
     uid_b = loader.current_view().probe_molecule.uid
     assert uid_a != uid_b
+
+
+def test_goto_uid_jumps_to_matching_molecule():
+    _require_sample_data()
+    from mongoose.tools.probe_viz.loader import ProbeVizLoader
+
+    loader = ProbeVizLoader(SAMPLE_DIR)
+    # Pick a UID that we know is not at index 0.
+    loader.advance(5)
+    target_uid = loader.current_view().probe_molecule.uid
+    loader.advance(-100)  # go to 0
+    assert loader.current_index == 0
+
+    assert loader.goto_uid(target_uid) is True
+    assert loader.current_view().probe_molecule.uid == target_uid
+
+
+def test_goto_uid_returns_false_when_not_in_list():
+    _require_sample_data()
+    from mongoose.tools.probe_viz.loader import ProbeVizLoader
+
+    loader = ProbeVizLoader(SAMPLE_DIR)
+    # Use a UID far above any plausible value.
+    assert loader.goto_uid(99_999_999) is False
+
+
+def test_goto_channel_mid_jumps():
+    _require_sample_data()
+    from mongoose.tools.probe_viz.loader import ProbeVizLoader
+
+    loader = ProbeVizLoader(SAMPLE_DIR)
+    loader.advance(3)
+    ch = loader.current_view().probe_molecule.channel
+    mid = loader.current_view().probe_molecule.molecule_id
+    loader.advance(-100)
+    assert loader.goto_channel_mid(ch, mid) is True
+    view = loader.current_view()
+    assert view.probe_molecule.channel == ch
+    assert view.probe_molecule.molecule_id == mid
+
+
+def test_toggle_do_not_use_keeps_nearest_by_uid():
+    _require_sample_data()
+    from mongoose.tools.probe_viz.loader import ProbeVizLoader
+
+    loader = ProbeVizLoader(SAMPLE_DIR)
+    loader.advance(3)
+    uid_before = loader.current_view().probe_molecule.uid
+
+    loader.toggle_do_not_use()  # now includes do_not_use molecules
+
+    # After toggle, total grew and we landed on the same or nearest UID.
+    uid_after = loader.current_view().probe_molecule.uid
+    # Same molecule is still present (toggling expands, doesn't remove).
+    assert uid_after == uid_before

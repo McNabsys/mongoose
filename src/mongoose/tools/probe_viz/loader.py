@@ -122,6 +122,46 @@ class ProbeVizLoader:
             new = self.total - 1
         self._current_position = new
 
+    def goto_uid(self, uid: int) -> bool:
+        """Jump to the molecule with this UID. Returns True if found in the
+        current iteration list."""
+        for pos, mol_idx in enumerate(self._iter_list):
+            if self._probes.molecules[mol_idx].uid == uid:
+                self._current_position = pos
+                return True
+        return False
+
+    def goto_channel_mid(self, channel: int, mid: int) -> bool:
+        """Jump to the molecule with matching (channel, molecule_id). Returns
+        True if found in the current iteration list."""
+        for pos, mol_idx in enumerate(self._iter_list):
+            m = self._probes.molecules[mol_idx]
+            if m.channel == channel and m.molecule_id == mid:
+                self._current_position = pos
+                return True
+        return False
+
+    def toggle_do_not_use(self) -> None:
+        """Toggle inclusion of do_not_use molecules. After rebuilding the
+        iteration list, snap the current position to the molecule with the
+        UID closest to the one we were viewing."""
+        current_uid = self._probes.molecules[
+            self._iter_list[self._current_position]
+        ].uid
+
+        self._include_do_not_use = not self._include_do_not_use
+        self._rebuild_iter_list()
+
+        best_pos = 0
+        best_delta = None
+        for pos, mol_idx in enumerate(self._iter_list):
+            uid = self._probes.molecules[mol_idx].uid
+            delta = abs(uid - current_uid)
+            if best_delta is None or delta < best_delta:
+                best_delta = delta
+                best_pos = pos
+        self._current_position = best_pos
+
     def _get_tdb(self, basename: str) -> tuple[TdbHeader, dict[tuple[int, int], int]]:
         cached = self._tdb_cache.get(basename)
         if cached is not None:
