@@ -26,6 +26,7 @@ class ProbeVizViewer:
 
         self.fig, self.ax = plt.subplots(figsize=(13, 6))
         self.fig.subplots_adjust(left=0.07, right=0.98, top=0.92, bottom=0.1)
+        self.fig.canvas.mpl_connect("key_press_event", self._on_key)
         self._info_text = None
         self.redraw()
 
@@ -118,3 +119,85 @@ class ProbeVizViewer:
             ha="right", va="top", fontsize=8, family="monospace",
             bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="lightgray", alpha=0.85),
         )
+
+    def _on_key(self, event) -> None:
+        key = event.key
+        if key == "right":
+            self.loader.advance(1)
+            self.redraw()
+        elif key == "left":
+            self.loader.advance(-1)
+            self.redraw()
+        elif key == "shift+right":
+            self.loader.advance(10)
+            self.redraw()
+        elif key == "shift+left":
+            self.loader.advance(-10)
+            self.redraw()
+        elif key == "pagedown":
+            self.loader.advance(100)
+            self.redraw()
+        elif key == "pageup":
+            self.loader.advance(-100)
+            self.redraw()
+        elif key == "home":
+            self.loader.advance(-self.loader.total)
+            self.redraw()
+        elif key == "end":
+            self.loader.advance(self.loader.total)
+            self.redraw()
+        elif key == "a":
+            self.show_excluded_probes = not self.show_excluded_probes
+            self.redraw()
+        elif key == "s":
+            self.show_structures = not self.show_structures
+            self.redraw()
+        elif key == "e":
+            self.show_tdb_edges = not self.show_tdb_edges
+            self.redraw()
+        elif key == "u":
+            self.loader.toggle_do_not_use()
+            self.redraw()
+        elif key == "r":
+            # Re-render resets axis limits via ax.clear() in redraw().
+            self.redraw()
+        elif key == "g":
+            self._prompt_goto()
+        elif key in ("q", "escape"):
+            self._plt.close(self.fig)
+
+    def _prompt_goto(self) -> None:
+        print(
+            "Goto — enter 'UID=<n>' or '<ch>:<mid>' (empty to cancel): ",
+            end="", flush=True,
+        )
+        try:
+            line = input().strip()
+        except EOFError:
+            return
+        if not line:
+            return
+        if line.upper().startswith("UID="):
+            try:
+                uid = int(line[4:].strip())
+            except ValueError:
+                print(f"  invalid UID: {line!r}")
+                return
+            if self.loader.goto_uid(uid):
+                self.redraw()
+            else:
+                print(f"  UID {uid} not in current iteration list")
+        elif ":" in line:
+            try:
+                ch_s, mid_s = line.split(":", 1)
+                ch = int(ch_s.strip())
+                mid = int(mid_s.strip())
+            except ValueError:
+                print(f"  invalid ch:mid: {line!r}")
+                return
+            if self.loader.goto_channel_mid(ch, mid):
+                self.redraw()
+            else:
+                print(f"  ch={ch} mid={mid} not in current iteration list")
+        else:
+            print(f"  unrecognized goto syntax: {line!r}")
