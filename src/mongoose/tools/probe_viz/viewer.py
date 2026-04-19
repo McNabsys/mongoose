@@ -50,10 +50,12 @@ class ProbeVizViewer:
 
         self.ax.plot(t_ms, y_uv, color="steelblue", linewidth=0.6, label="waveform")
 
-        # Level 1 horizontal
+        # Level 1 horizontal. probes.bin V5 stores mean_lvl1 in mV (Table 3);
+        # the waveform axis is µV, so convert.
+        level1_uv = pm.mean_lvl1 * 1000.0
         self.ax.axhline(
-            pm.mean_lvl1, color="firebrick", linestyle="--",
-            linewidth=0.7, alpha=0.5, label=f"level1={pm.mean_lvl1:.0f}µV",
+            level1_uv, color="firebrick", linestyle="--",
+            linewidth=0.7, alpha=0.5, label=f"level1={level1_uv:.0f}µV",
         )
 
         # Molecule start (where probes are measured relative to)
@@ -112,7 +114,7 @@ class ProbeVizViewer:
         info = (
             f"{view.tdb_basename}\n"
             f"transloc = {pm.transloc_time_ms:.2f} ms\n"
-            f"mean_lvl1 = {pm.mean_lvl1:.1f} µV"
+            f"mean_lvl1 = {level1_uv:.1f} µV"
         )
         self.ax.text(
             0.99, 0.98, info, transform=self.ax.transAxes,
