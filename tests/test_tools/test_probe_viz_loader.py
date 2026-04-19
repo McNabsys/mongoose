@@ -35,3 +35,34 @@ def test_discover_probes_bin_missing_raises(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="_probes.bin"):
         discover_probes_bin(tmp_path)
+
+
+def test_loader_filters_do_not_use_by_default():
+    _require_sample_data()
+    from mongoose.tools.probe_viz.loader import ProbeVizLoader
+
+    loader = ProbeVizLoader(SAMPLE_DIR)
+    assert loader.total > 0
+    assert loader.current_index == 0
+
+
+def test_loader_include_do_not_use_expands_total():
+    _require_sample_data()
+    from mongoose.tools.probe_viz.loader import ProbeVizLoader
+
+    default = ProbeVizLoader(SAMPLE_DIR)
+    all_mols = ProbeVizLoader(SAMPLE_DIR, include_do_not_use=True)
+    assert all_mols.total > default.total
+
+
+def test_loader_advance_clamps():
+    _require_sample_data()
+    from mongoose.tools.probe_viz.loader import ProbeVizLoader
+
+    loader = ProbeVizLoader(SAMPLE_DIR)
+    loader.advance(-5)
+    assert loader.current_index == 0
+    loader.advance(loader.total + 10)
+    assert loader.current_index == loader.total - 1
+    loader.advance(-1)
+    assert loader.current_index == loader.total - 2
