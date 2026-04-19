@@ -210,6 +210,7 @@ def test_combined_loss_forward_runs_with_warmstart(minimal_batch_with_warmstart)
     combined = CombinedLoss(warmstart_epochs=5, warmstart_fade_epochs=2)
     combined.set_epoch(0)
     batch = minimal_batch_with_warmstart
+    pred_heatmap_logits = torch.randn_like(batch["pred_heatmap"])
     loss, details = combined(
         pred_heatmap=batch["pred_heatmap"],
         pred_cumulative_bp=batch["pred_cumulative_bp"],
@@ -219,6 +220,7 @@ def test_combined_loss_forward_runs_with_warmstart(minimal_batch_with_warmstart)
         warmstart_heatmap=batch["warmstart_heatmap"],
         warmstart_valid=batch["warmstart_valid"],
         mask=batch["mask"],
+        pred_heatmap_logits=pred_heatmap_logits,
     )
     assert torch.isfinite(loss)
     assert details["warmstart_blend"] == 1.0

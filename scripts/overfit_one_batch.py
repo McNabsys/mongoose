@@ -49,8 +49,6 @@ def main() -> None:
     parser.add_argument("--lambda-count", type=float, default=1.0)
     parser.add_argument("--nms-threshold", type=float, default=0.3,
                         help="Training-time NMS threshold inside CombinedLoss. Lower=more candidate peaks for bp gradient.")
-    parser.add_argument("--probe-pos-weight", type=float, default=0.0,
-                        help="Positive-sample emphasis in probe MSE. weight=1+pos_weight*target. Counters sparse-target class imbalance.")
     parser.add_argument("--output-viz", type=Path, default=Path("overfit_gate_viz.png"))
     args = parser.parse_args()
 
@@ -96,7 +94,6 @@ def main() -> None:
         scale_bp=args.scale_bp,
         scale_vel=args.scale_vel,
         scale_count=args.scale_count,
-        probe_pos_weight=args.probe_pos_weight,
     )
     criterion.set_epoch(0)
 
