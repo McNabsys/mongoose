@@ -66,3 +66,30 @@ def test_loader_advance_clamps():
     assert loader.current_index == loader.total - 1
     loader.advance(-1)
     assert loader.current_index == loader.total - 2
+
+
+def test_current_view_returns_waveform_and_scale():
+    _require_sample_data()
+    from mongoose.tools.probe_viz.loader import ProbeVizLoader, ViewData
+
+    loader = ProbeVizLoader(SAMPLE_DIR)
+    view = loader.current_view()
+    assert isinstance(view, ViewData)
+    assert view.tdb_molecule.waveform.size > 0
+    assert view.sample_rate > 0
+    assert view.scale_uv_per_lsb > 0.0
+    assert view.tdb_basename.endswith(".tdb")
+    assert view.probe_molecule.channel == view.tdb_molecule.channel_source
+    assert view.iter_index == 0
+    assert view.iter_total == loader.total
+
+
+def test_current_view_changes_after_advance():
+    _require_sample_data()
+    from mongoose.tools.probe_viz.loader import ProbeVizLoader
+
+    loader = ProbeVizLoader(SAMPLE_DIR)
+    uid_a = loader.current_view().probe_molecule.uid
+    loader.advance(1)
+    uid_b = loader.current_view().probe_molecule.uid
+    assert uid_a != uid_b
