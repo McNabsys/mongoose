@@ -59,3 +59,25 @@ def test_centernet_focal_loss_length_invariant_with_same_num_positives():
         f"length dilution detected: short={loss_short.item()}, long={loss_long.item()}, "
         f"ratio={ratio}"
     )
+
+
+def test_centernet_focal_loss_masked_region_has_no_effect():
+    target = _gaussian_target(length=100, centers=[20, 50, 80])
+    # Predict peaks at 20 and 50 well, but miss the peak at 80.
+    # Non-uniform logits make the three positive terms contribute differently,
+    # so masking out peak 80 produces a measurably different per-peak average.
+    logits = torch.full((100,), -5.0)
+    logits[20] = 8.0  # near-perfect for peak at 20
+    logits[50] = 8.0  # near-perfect for peak at 50
+    # index 80 stays at -5.0 (missed peak)
+    mask_full = torch.ones(100, dtype=torch.bool)
+    mask_half = torch.ones(100, dtype=torch.bool)
+    mask_half[60:] = False  # drop the peak at 80 and everything after
+
+    loss_full = centernet_focal_loss(logits, target, mask_full)
+    loss_half = centernet_focal_loss(logits, target, mask_half)
+
+    # Masking-out the region containing 1 of 3 peaks should change the loss.
+    assert abs(loss_full.item() - loss_half.item()) > 1e-3, (
+        f"mask had no effect: full={loss_full.item()}, half={loss_half.item()}"
+    )
