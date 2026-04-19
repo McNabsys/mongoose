@@ -37,3 +37,25 @@ def test_centernet_focal_loss_flat_zero_prediction():
     loss = centernet_focal_loss(logits, target, mask)
     # Three missed peaks should produce a substantial per-peak loss (>> perfect case)
     assert loss.item() > 2.0, f"expected high loss for flat-zero prediction, got {loss.item()}"
+
+
+def test_centernet_focal_loss_length_invariant_with_same_num_positives():
+    """Two molecules with same #peaks, same per-peak quality, different lengths
+    should produce similar losses (modulo halo effect)."""
+    target_short = _gaussian_target(length=100, centers=[20, 50, 80])
+    target_long  = _gaussian_target(length=300, centers=[20, 50, 80])
+    logits_short = torch.full((100,), -5.0)
+    logits_long  = torch.full((300,), -5.0)
+    mask_short = torch.ones(100, dtype=torch.bool)
+    mask_long  = torch.ones(300, dtype=torch.bool)
+
+    loss_short = centernet_focal_loss(logits_short, target_short, mask_short)
+    loss_long  = centernet_focal_loss(logits_long,  target_long,  mask_long)
+
+    # Losses should be within 25% of each other — not 3x as would happen
+    # with a seq-length denominator.
+    ratio = loss_long.item() / loss_short.item()
+    assert 0.75 < ratio < 1.25, (
+        f"length dilution detected: short={loss_short.item()}, long={loss_long.item()}, "
+        f"ratio={ratio}"
+    )
