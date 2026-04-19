@@ -9,10 +9,11 @@ The normalization divides the per-sample sum by the number of positive samples
 in the molecule (not the sequence length), giving gradient strength that is
 independent of padded/variable waveform length.
 
-BF16 caveat: ``target.eq(1.0)`` is avoided because a ``wfmproc`` heatmap stored
-as float32 and downcast inside ``torch.amp.autocast('cuda', dtype=bfloat16)``
-may arrive at this loss slightly below exact 1.0 due to mantissa truncation.
-``.ge(0.99)`` is used instead to identify peak-center samples.
+Uses ``>= pos_threshold`` rather than ``== 1.0`` to identify peak-center
+samples. This guards against floating-point accumulation errors in the
+heatmap generator (where overlapping Gaussians are combined via ``np.maximum``
+on float32) and any BF16 rounding that may shift peak values in mixed-precision
+training.
 """
 from __future__ import annotations
 
@@ -29,6 +30,10 @@ def centernet_focal_loss(
     eps: float = 1e-4,
 ) -> torch.Tensor:
     """Compute CenterNet focal loss for a single molecule.
+
+    Unlike other losses in this package that take post-sigmoid probabilities,
+    this function takes pre-sigmoid logits and applies ``sigmoid`` internally
+    for numerical stability at saturated outputs.
 
     Args:
         logits: ``[T]`` raw logits from the probe head (pre-sigmoid).

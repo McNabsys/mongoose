@@ -25,4 +25,4 @@ def test_centernet_focal_loss_perfect_prediction():
     mask = torch.ones(100, dtype=torch.bool)
 
     loss = centernet_focal_loss(logits, target, mask)
-    assert loss.item() < 0.5, f"expected low loss for near-perfect prediction, got {loss.item()}"
+    assert loss.item() < 0.1, f"expected low loss for near-perfect prediction, got {loss.item()}"
