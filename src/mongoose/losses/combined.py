@@ -141,6 +141,7 @@ class CombinedLoss:
         warmstart_valid: torch.Tensor | None,
         mask: torch.Tensor,
         pred_heatmap_logits: torch.Tensor | None = None,
+        warmstart_probe_centers_samples_list: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Compute combined loss for a batch.
 
@@ -159,6 +160,15 @@ class CombinedLoss:
                 logits (not post-sigmoid probabilities) for numerical
                 stability at saturated outputs. Passing ``None`` while
                 warmstart is active raises ``ValueError``.
+            warmstart_probe_centers_samples_list: Optional list of per-molecule
+                ground-truth probe center sample indices (``LongTensor[K_i]``).
+                When provided, L_bp and L_vel are evaluated at these indices
+                (teacher forcing) instead of at NMS-detected peaks. This
+                bypasses the non-differentiable NMS gate and lets the velocity
+                head receive flawless supervision from step 1 regardless of
+                the probe head's state. When ``None`` (or when a molecule's
+                entry is ``None``), falls back to the legacy NMS-detected
+                branch.
             warmstart_valid: [B] bool tensor flagging which molecules have
                 valid warmstart labels, or ``None``.
             mask: [B, T] boolean mask for valid (non-padded) samples.
@@ -208,40 +218,95 @@ class CombinedLoss:
 
             probe_terms.append(probe_component)
 
-            # ----------------- Detect peaks (no grad) -----------------
-            peak_indices = extract_peak_indices(
-                pred_h_b,
-                raw_v_b,
-                threshold=self.nms_threshold,
-                tag_width_bp=self.tag_width_bp,
-            )
+            # Decide between teacher forcing and NMS-detected peak extraction.
+            gt_centers: torch.Tensor | None = None
+            if (
+                warmstart_probe_centers_samples_list is not None
+                and warmstart_probe_centers_samples_list[b] is not None
+            ):
+                gt_centers_raw = warmstart_probe_centers_samples_list[b]
+                if gt_centers_raw.numel() >= 2:
+                    gt_centers = gt_centers_raw.to(device=device, dtype=torch.long)
 
-            ref_bp = reference_bp_positions_list[b]
+            if gt_centers is not None:
+                # ---- Teacher-forced path ----
+                # Clamp to valid range before gather (defensive; preprocess
+                # should ensure all centers fall inside the waveform).
+                gt_centers = gt_centers.clamp(0, pred_h_b.shape[0] - 1)
 
-            # ----------------- L_bp (soft-DTW) -----------------
-            if peak_indices.numel() >= 2 and ref_bp.numel() >= 2:
-                pred_bp_at_peaks = pred_bp_b[peak_indices]
-                ref_bp_f = ref_bp.to(device=device, dtype=pred_bp_at_peaks.dtype)
-                pred_norm = pred_bp_at_peaks - pred_bp_at_peaks[0]
-                ref_norm = (ref_bp_f - ref_bp_f[0]).abs()
-                span = (ref_bp_f[-1] - ref_bp_f[0]).abs()
-                span = torch.clamp(span, min=1.0)
-                dtw = soft_dtw(pred_norm, ref_norm, gamma=self.softdtw_gamma)
-                bp_terms.append(dtw / span)
+                # L_bp: soft-DTW between model-predicted cumulative-bp AT THE
+                # GROUND-TRUTH SAMPLE INDICES and the reference bp positions.
+                # Indices are the same length as ref_bp, so DTW is 1:1 and
+                # could reduce to Huber; keeping soft-DTW for symmetry with
+                # the inference path.
+                pred_bp_at_peaks = pred_bp_b[gt_centers]
+                ref_bp = reference_bp_positions_list[b]
+                if ref_bp.numel() >= 2:
+                    ref_bp_f = ref_bp.to(device=device, dtype=pred_bp_at_peaks.dtype)
+                    pred_norm = pred_bp_at_peaks - pred_bp_at_peaks[0]
+                    ref_norm = (ref_bp_f - ref_bp_f[0]).abs()
+                    span = (ref_bp_f[-1] - ref_bp_f[0]).abs().clamp(min=1.0)
+                    dtw = soft_dtw(pred_norm, ref_norm, gamma=self.softdtw_gamma)
+                    bp_terms.append(dtw / span)
 
-                # -------------- L_velocity (dense at peaks) --------------
-                widths_samples = measure_peak_widths_samples(
-                    pred_h_b, peak_indices, threshold_frac=0.5
-                )
-                widths_ms = widths_samples.to(device=device, dtype=raw_v_b.dtype) * float(
-                    self.sample_period_ms
-                )
+                # L_vel: MSE between raw_velocity at the ground-truth indices
+                # and the per-peak target derived from the GROUND-TRUTH
+                # heatmap's FWHM at those same indices. Since target heatmaps
+                # are Gaussians centered at the ground truth, we can measure
+                # widths directly from the warmstart heatmap.
+                if warmstart_heatmap is not None:
+                    ws_b = warmstart_heatmap[b]
+                    widths_samples = measure_peak_widths_samples(
+                        ws_b, gt_centers, threshold_frac=0.5
+                    )
+                else:
+                    # Falls back to predicted widths — less accurate but keeps
+                    # the path defined for unit tests that omit warmstart.
+                    widths_samples = measure_peak_widths_samples(
+                        pred_h_b, gt_centers, threshold_frac=0.5
+                    )
+                widths_ms = widths_samples.to(
+                    device=device, dtype=raw_v_b.dtype
+                ) * float(self.sample_period_ms)
                 widths_ms = torch.clamp(widths_ms, min=1e-6)
                 target_v = (
                     float(self.tag_width_bp) / widths_ms * float(self.sample_period_ms)
                 )
-                pred_v_at_peaks = raw_v_b[peak_indices]
+                pred_v_at_peaks = raw_v_b[gt_centers]
                 vel_terms.append(F.mse_loss(pred_v_at_peaks, target_v.detach()))
+            else:
+                # ---- Legacy NMS-detected peaks path (unchanged) ----
+                peak_indices = extract_peak_indices(
+                    pred_h_b,
+                    raw_v_b,
+                    threshold=self.nms_threshold,
+                    tag_width_bp=self.tag_width_bp,
+                )
+
+                ref_bp = reference_bp_positions_list[b]
+
+                if peak_indices.numel() >= 2 and ref_bp.numel() >= 2:
+                    pred_bp_at_peaks = pred_bp_b[peak_indices]
+                    ref_bp_f = ref_bp.to(device=device, dtype=pred_bp_at_peaks.dtype)
+                    pred_norm = pred_bp_at_peaks - pred_bp_at_peaks[0]
+                    ref_norm = (ref_bp_f - ref_bp_f[0]).abs()
+                    span = (ref_bp_f[-1] - ref_bp_f[0]).abs()
+                    span = torch.clamp(span, min=1.0)
+                    dtw = soft_dtw(pred_norm, ref_norm, gamma=self.softdtw_gamma)
+                    bp_terms.append(dtw / span)
+
+                    widths_samples = measure_peak_widths_samples(
+                        pred_h_b, peak_indices, threshold_frac=0.5
+                    )
+                    widths_ms = widths_samples.to(
+                        device=device, dtype=raw_v_b.dtype
+                    ) * float(self.sample_period_ms)
+                    widths_ms = torch.clamp(widths_ms, min=1e-6)
+                    target_v = (
+                        float(self.tag_width_bp) / widths_ms * float(self.sample_period_ms)
+                    )
+                    pred_v_at_peaks = raw_v_b[peak_indices]
+                    vel_terms.append(F.mse_loss(pred_v_at_peaks, target_v.detach()))
 
             # ----------------- L_count -----------------
             count_terms.append(

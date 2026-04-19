@@ -437,3 +437,58 @@ def test_combined_loss_scale_divisor_rejects_non_positive():
         CombinedLoss(scale_bp=0.0)
     with pytest.raises(ValueError, match="scale_vel must be positive"):
         CombinedLoss(scale_vel=-1.0)
+
+
+def test_combined_loss_teacher_forcing_gives_vel_gradient_with_flat_probe():
+    """Given a flat probe heatmap (no peaks above NMS threshold), teacher
+    forcing should still produce a nonzero L_vel gradient into ``raw_velocity``
+    via the ground-truth index path. Without teacher forcing, L_vel is zero
+    because extract_peak_indices returns <2 peaks."""
+    import torch
+    from mongoose.losses.combined import CombinedLoss
+
+    B, T = 2, 200
+    # Flat probe output — sigmoid = 0.047 everywhere, no peaks detected.
+    pred_heatmap = torch.full((B, T), 0.047, requires_grad=False)
+    pred_heatmap_logits = torch.full((B, T), -3.0, requires_grad=False)
+    raw_velocity = torch.rand((B, T), requires_grad=True)
+    pred_cumulative_bp = torch.cumsum(raw_velocity, dim=-1)
+    mask = torch.ones(B, T, dtype=torch.bool)
+    warmstart_heatmap = torch.zeros(B, T)
+    warmstart_heatmap[0, [50, 100, 150]] = 1.0
+    warmstart_heatmap[1, [60, 120]] = 1.0
+    warmstart_valid = torch.tensor([True, True])
+    ref_bp = [torch.tensor([0, 100, 200], dtype=torch.long),
+              torch.tensor([0, 100], dtype=torch.long)]
+    n_ref = torch.tensor([3, 2], dtype=torch.long)
+    centers = [torch.tensor([50, 100, 150], dtype=torch.long),
+               torch.tensor([60, 120], dtype=torch.long)]
+
+    loss_fn = CombinedLoss(
+        scale_bp=300000.0, scale_vel=5000.0, scale_count=1e9, scale_probe=1.0,
+        lambda_bp=1.0, lambda_vel=1.0, lambda_count=0.0,
+        warmstart_epochs=1, warmstart_fade_epochs=0, min_blend=1.0,
+    )
+    loss_fn.set_epoch(0)
+
+    total, details = loss_fn(
+        pred_heatmap=pred_heatmap,
+        pred_cumulative_bp=pred_cumulative_bp,
+        raw_velocity=raw_velocity,
+        reference_bp_positions_list=ref_bp,
+        n_ref_probes=n_ref,
+        warmstart_heatmap=warmstart_heatmap,
+        warmstart_valid=warmstart_valid,
+        mask=mask,
+        pred_heatmap_logits=pred_heatmap_logits,
+        warmstart_probe_centers_samples_list=centers,
+    )
+    total.backward()
+
+    assert raw_velocity.grad is not None, "raw_velocity should have received gradient"
+    assert raw_velocity.grad.abs().sum().item() > 0.0, (
+        "teacher forcing should produce nonzero velocity gradient even with flat probe"
+    )
+    assert details["vel_raw"] > 0.0, (
+        f"expected nonzero raw L_vel under teacher forcing, got {details['vel_raw']}"
+    )
