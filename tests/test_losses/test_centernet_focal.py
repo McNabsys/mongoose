@@ -26,3 +26,14 @@ def test_centernet_focal_loss_perfect_prediction():
 
     loss = centernet_focal_loss(logits, target, mask)
     assert loss.item() < 0.1, f"expected low loss for near-perfect prediction, got {loss.item()}"
+
+
+def test_centernet_focal_loss_flat_zero_prediction():
+    target = _gaussian_target(length=100, centers=[20, 50, 80])
+    # Model outputs near-zero probability everywhere: logit << 0
+    logits = torch.full((100,), -5.0)
+    mask = torch.ones(100, dtype=torch.bool)
+
+    loss = centernet_focal_loss(logits, target, mask)
+    # Three missed peaks should produce a substantial per-peak loss (>> perfect case)
+    assert loss.item() > 2.0, f"expected high loss for flat-zero prediction, got {loss.item()}"
