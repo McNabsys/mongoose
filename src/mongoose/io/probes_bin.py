@@ -144,7 +144,7 @@ def load_probes_bin(path: str | Path, *, max_molecules: int | None = None) -> Pr
 
         # -- Per-molecule blocks --
         for _ in range(count):
-            # Fixed fields (89 bytes)
+            # Fixed fields (93 bytes)
             file_name_index = struct.unpack("<I", f.read(4))[0]
             channel = struct.unpack("<i", f.read(4))[0]
             molecule_id = struct.unpack("<I", f.read(4))[0]
