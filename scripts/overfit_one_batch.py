@@ -118,6 +118,10 @@ def main() -> None:
                 warmstart_valid=warmstart_valid,
                 mask=mask,
                 pred_heatmap_logits=probe_logits.float(),
+                warmstart_probe_centers_samples_list=[
+                    (c.to(device) if c is not None else None)
+                    for c in batch["warmstart_probe_centers_samples"]
+                ],
             )
 
         if not math.isfinite(loss.item()):

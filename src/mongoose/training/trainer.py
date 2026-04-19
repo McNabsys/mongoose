@@ -310,6 +310,12 @@ class Trainer:
         warmstart_valid = batch.get("warmstart_valid")
         if warmstart_valid is not None:
             warmstart_valid = warmstart_valid.to(self.device)
+        warmstart_probe_centers_samples = batch.get("warmstart_probe_centers_samples")
+        if warmstart_probe_centers_samples is not None:
+            warmstart_probe_centers_samples = [
+                (c.to(self.device) if c is not None else None)
+                for c in warmstart_probe_centers_samples
+            ]
 
         with torch.amp.autocast(
             "cuda",
@@ -333,6 +339,7 @@ class Trainer:
                 warmstart_valid=warmstart_valid,
                 mask=mask,
                 pred_heatmap_logits=probe_logits.float(),
+                warmstart_probe_centers_samples_list=warmstart_probe_centers_samples,
             )
 
         return loss, details
