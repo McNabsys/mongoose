@@ -153,11 +153,12 @@ class CombinedLoss:
             n_ref_probes: [B] int tensor with the number of reference probes.
             warmstart_heatmap: [B, T] float tensor (pre-built Gaussians), or
                 ``None`` to skip the probe supervision term.
-            pred_heatmap_logits: Optional [B, T] raw logits. When provided,
-                the probe term uses ``BCEWithLogitsLoss`` for numerical
-                stability under saturated sigmoid outputs. Without it, the
-                probe term falls back to positive-weighted MSE on the
-                sigmoid-activated heatmap (less stable once outputs saturate).
+            pred_heatmap_logits: [B, T] raw logits. Required whenever
+                ``warmstart_heatmap`` / ``warmstart_valid`` mark a molecule
+                for probe supervision; the CenterNet focal loss operates on
+                logits (not post-sigmoid probabilities) for numerical
+                stability at saturated outputs. Passing ``None`` while
+                warmstart is active raises ``ValueError``.
             warmstart_valid: [B] bool tensor flagging which molecules have
                 valid warmstart labels, or ``None``.
             mask: [B, T] boolean mask for valid (non-padded) samples.
