@@ -81,3 +81,19 @@ def test_centernet_focal_loss_masked_region_has_no_effect():
     assert abs(loss_full.item() - loss_half.item()) > 1e-3, (
         f"mask had no effect: full={loss_full.item()}, half={loss_half.item()}"
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA for bf16 autocast")
+def test_centernet_focal_loss_bf16_autocast_no_nan():
+    target = _gaussian_target(length=200, centers=[30, 80, 130, 180]).cuda()
+    logits = torch.randn(200, device="cuda", requires_grad=True)
+    mask = torch.ones(200, dtype=torch.bool, device="cuda")
+
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        loss = centernet_focal_loss(logits, target, mask)
+    loss.backward()
+
+    assert torch.isfinite(loss), f"loss is not finite under bf16 autocast: {loss}"
+    assert logits.grad is not None and torch.isfinite(logits.grad).all(), (
+        "gradient contains NaN or Inf under bf16 autocast"
+    )
