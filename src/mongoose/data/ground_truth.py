@@ -32,8 +32,6 @@ from mongoose.io.probes_bin import Molecule
 from mongoose.io.reference_map import ReferenceMap
 
 TAG_WIDTH_BP = 511
-SAMPLE_RATE_HZ = 40_000
-SAMPLE_PERIOD_MS = 1000.0 / SAMPLE_RATE_HZ  # 0.025 ms
 
 
 @dataclass
@@ -67,6 +65,7 @@ def build_molecule_gt(
     assign: MoleculeAssignment,
     ref: ReferenceMap,
     *,
+    sample_rate_hz: int,
     min_matched_probes: int = 4,
     include_warmstart: bool = True,
 ) -> MoleculeGT | None:
@@ -76,6 +75,10 @@ def build_molecule_gt(
         mol: Molecule from probes.bin with detected probe events.
         assign: Assignment mapping this molecule's probes to reference probes.
         ref: Reference map with known probe positions on the genome.
+        sample_rate_hz: TDB sample rate in Hz (read from ``TdbHeader.sample_rate``).
+            Used to convert ``probe.center_ms`` to sample indices. Required and
+            keyword-only — hardcoding this previously caused a silent label
+            mis-alignment bug.
         min_matched_probes: Minimum number of matched probes required.
             Keyword-only.
         include_warmstart: If True, populate the warmstart_* fields using
@@ -133,6 +136,13 @@ def build_molecule_gt(
     warmstart_durations: np.ndarray | None = None
 
     if include_warmstart:
+        # probe.center_ms is measured from the molecule's translocation start
+        # (probes.bin stores ``start_within_tdb_ms`` as the molecule-start
+        # offset within the TDB block's waveform). The sample index in the
+        # cached waveform is therefore:
+        #     (start_within_tdb_ms + probe.center_ms) * sample_rate_hz / 1000
+        sample_period_ms = 1000.0 / sample_rate_hz
+        mol_start_ms = float(mol.start_within_tdb_ms)
         centers: list[int] = []
         durations: list[float] = []
         for mol_probe_idx, _bp in unique_matched:
@@ -141,8 +151,10 @@ def build_molecule_gt(
             probe = mol.probes[mol_probe_idx]
             if probe.duration_ms <= 0:
                 continue
-            centers.append(int(round(probe.center_ms / SAMPLE_PERIOD_MS)))
-            durations.append(float(probe.duration_ms / SAMPLE_PERIOD_MS))
+            centers.append(
+                int(round((mol_start_ms + probe.center_ms) / sample_period_ms))
+            )
+            durations.append(float(probe.duration_ms / sample_period_ms))
 
         if centers:
             warmstart_centers = np.array(centers, dtype=np.int64)

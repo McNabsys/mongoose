@@ -152,16 +152,6 @@ def preprocess_run(
                 continue
             stats.remapped_molecules += 1
 
-            gt = build_molecule_gt(
-                mol,
-                assign,
-                ref,
-                min_matched_probes=min_probes // 2,
-                include_warmstart=True,
-            )
-            if gt is None:
-                continue
-
             # Route to the correct TDB via file_name_index + (channel, MID).
             fni = int(mol.file_name_index)
             if fni < 0 or fni >= len(tdb_paths):
@@ -193,6 +183,20 @@ def preprocess_run(
                     exc_info=True,
                 )
                 skipped_identity += 1
+                continue
+
+            # Build ground truth now that we know the TDB header's sample_rate.
+            # probe.center_ms -> sample index requires this rate, plus the
+            # molecule's start_within_tdb_ms offset (see build_molecule_gt).
+            gt = build_molecule_gt(
+                mol,
+                assign,
+                ref,
+                sample_rate_hz=tdb_headers[fni].sample_rate,
+                min_matched_probes=min_probes // 2,
+                include_warmstart=True,
+            )
+            if gt is None:
                 continue
 
             waveform = tdb_mol.waveform

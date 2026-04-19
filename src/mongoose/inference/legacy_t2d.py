@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from mongoose.data.ground_truth import MoleculeGT, SAMPLE_PERIOD_MS
+from mongoose.data.ground_truth import MoleculeGT
 from mongoose.io.probes_bin import Molecule
 
 
@@ -22,6 +22,8 @@ def legacy_t2d_intervals(
     mult_const: float,
     addit_const: float,
     alpha: float,
+    *,
+    sample_rate_hz: int,
 ) -> np.ndarray:
     """Compute inter-probe intervals using the legacy T2D power-law model.
 
@@ -37,12 +39,14 @@ def legacy_t2d_intervals(
         mult_const: Multiplicative constant from _transForm.txt.
         addit_const: Additive constant from _transForm.txt (can be negative).
         alpha: Exponent from _transForm.txt.
+        sample_rate_hz: TDB sample rate in Hz. Required keyword-only.
 
     Returns:
         1D array of inter-probe intervals in bp (length = num_probes - 1).
     """
+    sample_period_ms = 1000.0 / sample_rate_hz
     # Trailing edge in sample index
-    tail_sample = mol.fall_t50 / SAMPLE_PERIOD_MS
+    tail_sample = mol.fall_t50 / sample_period_ms
 
     probe_samples = gt.probe_sample_indices  # sorted ascending temporally
 

@@ -66,6 +66,11 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
+# Nabsys TDBs sample at 32 kHz. This script is legacy / pre-V1 — a proper
+# implementation would read ``TdbHeader.sample_rate`` from the actual TDB.
+_TDB_SAMPLE_RATE_HZ = 32_000
+
+
 def _format_metrics(name: str, metrics: EvalMetrics) -> str:
     """Format metrics as a table row."""
     return (
@@ -209,7 +214,7 @@ def main() -> None:
             skipped += 1
             continue
 
-        gt = build_molecule_gt(mol, assign, ref_map)
+        gt = build_molecule_gt(mol, assign, ref_map, sample_rate_hz=_TDB_SAMPLE_RATE_HZ)
         if gt is None:
             skipped += 1
             continue
@@ -270,7 +275,8 @@ def main() -> None:
             ch_transform = transforms.get(ch_key)
             if ch_transform is not None:
                 legacy_ivl = legacy_t2d_intervals(
-                    mol, gt, ch_transform.mult_const, ch_transform.addit_const, ch_transform.alpha
+                    mol, gt, ch_transform.mult_const, ch_transform.addit_const, ch_transform.alpha,
+                    sample_rate_hz=_TDB_SAMPLE_RATE_HZ,
                 )
                 legacy_pred_intervals.append(legacy_ivl[:n_common])
             else:
