@@ -66,6 +66,16 @@ def collate_molecules(items: list[dict]) -> dict:
         masks[i, :t] = item["mask"]
         if all_have_warmstart:
             warmstart_heatmaps[i, :t] = item["warmstart_heatmap"]  # type: ignore[index]
+        # Per-molecule z-score on the valid-mask region only. Padding stays at 0.
+        # Rationale: post-preprocess waveform amplitudes come out at ~1e-4
+        # (unit scaling in preprocess is suspect), which is at the BF16
+        # precision floor and incompatible with Kaiming/Xavier N(0,1) init
+        # assumptions. Normalizing here is cheaper than rebuilding 1.25M
+        # cached molecules and is robust to whatever units the raw waveform
+        # ends up in.
+        valid = waveforms[i, 0, :t]
+        std = valid.std().clamp(min=1e-8)
+        waveforms[i, 0, :t] = (valid - valid.mean()) / std
 
     conditioning = torch.stack([item["conditioning"] for item in items])
 
