@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,6 +67,13 @@ def discover_probes_bin(sample_dir: Path) -> tuple[Path, Path]:
         )
 
     probes_bin = candidates[0]
+    if len(candidates) > 1:
+        others = ", ".join(c.name for c in candidates[1:])
+        print(
+            f"info: multiple probes.bin found in {probes_bin.parent}; "
+            f"using {probes_bin.name} (ignoring: {others})",
+            file=sys.stderr,
+        )
     probes_bin_files = probes_bin.with_suffix(".bin.files")
     if not probes_bin_files.exists():
         raise FileNotFoundError(
@@ -192,8 +200,11 @@ class ProbeVizLoader:
 
         try:
             ch_pos = header.channel_ids.index(probe_mol.channel)
-        except ValueError:
-            ch_pos = probe_mol.channel - 1
+        except ValueError as exc:
+            raise ValueError(
+                f"channel {probe_mol.channel} (from probes.bin) not found in "
+                f"TDB header's channel_ids {header.channel_ids}"
+            ) from exc
         scale = header.amplitude_scale_factors[ch_pos]
 
         return ViewData(

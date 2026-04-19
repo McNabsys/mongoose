@@ -7,12 +7,14 @@ import numpy as np
 from .loader import ProbeVizLoader, ViewData
 
 
-# Probe attribute bit 7: Probe Accepted
-_ATTR_ACCEPTED = 0x80
-
-
 class ProbeVizViewer:
-    """Matplotlib window showing one molecule's waveform with probe overlays."""
+    """Matplotlib window showing one molecule's waveform with probe overlays.
+
+    Note: pressing ``g`` reads the goto target from stdin via ``input()``, which
+    blocks the matplotlib event loop until the user finishes typing. The plot
+    window stays visible but unresponsive during the prompt. Acceptable for a
+    dev tool; a matplotlib TextBox widget would be more elegant.
+    """
 
     def __init__(self, loader: ProbeVizLoader) -> None:
         # Import lazily so that loader tests don't require matplotlib.
@@ -27,7 +29,6 @@ class ProbeVizViewer:
         self.fig, self.ax = plt.subplots(figsize=(13, 6))
         self.fig.subplots_adjust(left=0.07, right=0.98, top=0.92, bottom=0.1)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
-        self._info_text = None
         self.redraw()
 
     def show(self) -> None:
@@ -48,20 +49,20 @@ class ProbeVizViewer:
         t_ms = np.arange(n) / view.sample_rate * 1000.0
         y_uv = tm.waveform.astype(np.float64) * view.scale_uv_per_lsb
 
-        self.ax.plot(t_ms, y_uv, color="steelblue", linewidth=0.6, label="waveform")
+        self.ax.plot(t_ms, y_uv, color="steelblue", linewidth=0.6)
 
         # Level 1 horizontal. probes.bin V5 stores mean_lvl1 in mV (Table 3);
         # the waveform axis is µV, so convert.
         level1_uv = pm.mean_lvl1 * 1000.0
         self.ax.axhline(
             level1_uv, color="firebrick", linestyle="--",
-            linewidth=0.7, alpha=0.5, label=f"level1={level1_uv:.0f}µV",
+            linewidth=0.7, alpha=0.5,
         )
 
         # Molecule start (where probes are measured relative to)
         self.ax.axvline(
             pm.start_within_tdb_ms, color="goldenrod", linestyle="--",
-            linewidth=0.8, alpha=0.8, label=f"mol start={pm.start_within_tdb_ms:.2f}ms",
+            linewidth=0.8, alpha=0.8,
         )
 
         # Structured regions (behind waveform)
@@ -83,14 +84,13 @@ class ProbeVizViewer:
         # Probe centers
         accepted = 0
         for probe in pm.probes:
-            is_accepted = bool(probe.attribute & _ATTR_ACCEPTED)
-            if not is_accepted and not self.show_excluded_probes:
+            if not probe.accepted and not self.show_excluded_probes:
                 continue
             t = pm.start_within_tdb_ms + probe.center_ms
-            color = "seagreen" if is_accepted else "dimgray"
-            ls = "-" if is_accepted else "--"
+            color = "seagreen" if probe.accepted else "dimgray"
+            ls = "-" if probe.accepted else "--"
             self.ax.axvline(t, color=color, linestyle=ls, linewidth=0.8, alpha=0.85)
-            if is_accepted:
+            if probe.accepted:
                 accepted += 1
 
         self.ax.set_xlabel("time (ms, relative to TDB block start)")
