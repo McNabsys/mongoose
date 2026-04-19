@@ -60,6 +60,16 @@ def main() -> None:
         conditioning = item["conditioning"].unsqueeze(0).to(device)
         mask = item["mask"].unsqueeze(0).to(device)
 
+        # Mirror the per-molecule z-score standardization that
+        # ``collate_molecules`` applies at train / eval time. Without this the
+        # model sees raw ~1e-4 amplitudes and outputs near-zero predictions
+        # regardless of the checkpoint quality (silent mismatch between
+        # training distribution and inference distribution).
+        _valid = waveform[0, 0, mask[0]]
+        if _valid.numel() > 0:
+            _std = _valid.std().clamp(min=1e-8)
+            waveform[0, 0, mask[0]] = (_valid - _valid.mean()) / _std
+
         with torch.no_grad():
             with torch.amp.autocast(
                 "cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"
