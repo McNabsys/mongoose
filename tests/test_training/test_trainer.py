@@ -196,3 +196,86 @@ def test_trainer_cached_requires_cache_dirs():
         assert "cache_dirs" in str(exc)
     else:
         raise AssertionError("Expected ValueError when cache_dirs is None")
+
+
+def test_init_from_loads_weights_and_resets_epoch(tmp_path):
+    """--init-from loads model weights but NOT optimizer/scheduler/epoch."""
+    # Train briefly and save a checkpoint.
+    src_dir = tmp_path / "source"
+    config_src = TrainConfig(
+        use_synthetic=True,
+        synthetic_num_molecules=16,
+        epochs=1,
+        batch_size=4,
+        use_amp=False,
+        checkpoint_dir=src_dir,
+        save_every=1,
+    )
+    trainer_src = Trainer(config_src)
+    trainer_src.fit()
+    src_ckpt = src_dir / "checkpoint_epoch_000.pt"
+    assert src_ckpt.exists()
+
+    # Grab a reference weight to verify it loaded.
+    ref_param = next(iter(trainer_src.model.parameters())).detach().clone()
+
+    # Fresh trainer in an empty checkpoint_dir with init_from pointing at the
+    # saved weights. Should load weights, NOT resume epoch.
+    fresh_dir = tmp_path / "fresh"
+    config_fresh = TrainConfig(
+        use_synthetic=True,
+        synthetic_num_molecules=16,
+        epochs=5,
+        batch_size=4,
+        use_amp=False,
+        checkpoint_dir=fresh_dir,
+        save_every=1,
+        init_from=src_ckpt,
+    )
+    trainer_fresh = Trainer(config_fresh)
+
+    # Weights should match.
+    loaded_param = next(iter(trainer_fresh.model.parameters())).detach()
+    assert torch.allclose(ref_param, loaded_param), "init_from did not load weights"
+    # Epoch should be 0, not resumed.
+    assert trainer_fresh.start_epoch == 0, "init_from must reset start_epoch"
+    # best_val_loss should be fresh, not carried over.
+    assert trainer_fresh.best_val_loss == float("inf")
+
+
+def test_init_from_ignored_when_checkpoint_dir_has_checkpoints(tmp_path):
+    """Auto-resume wins over init_from when both are set."""
+    # First run: produce checkpoints in checkpoint_dir.
+    ckpt_dir = tmp_path / "ckpts"
+    config_a = TrainConfig(
+        use_synthetic=True,
+        synthetic_num_molecules=16,
+        epochs=1,
+        batch_size=4,
+        use_amp=False,
+        checkpoint_dir=ckpt_dir,
+        save_every=1,
+    )
+    Trainer(config_a).fit()
+    assert (ckpt_dir / "checkpoint_epoch_000.pt").exists()
+
+    # Point init_from at a DIFFERENT checkpoint entirely (shouldn't matter —
+    # existing checkpoint_dir wins). Use the same one for simplicity.
+    other_ckpt = ckpt_dir / "checkpoint_epoch_000.pt"
+
+    # New trainer: both init_from and existing checkpoint_dir populated.
+    # Resume should win → start_epoch == 1 (resumed from epoch 0).
+    config_b = TrainConfig(
+        use_synthetic=True,
+        synthetic_num_molecules=16,
+        epochs=3,
+        batch_size=4,
+        use_amp=False,
+        checkpoint_dir=ckpt_dir,  # has a checkpoint
+        save_every=1,
+        init_from=other_ckpt,  # should be ignored
+    )
+    trainer_b = Trainer(config_b)
+    assert trainer_b.start_epoch == 1, (
+        "Resume from checkpoint_dir must win over init_from"
+    )

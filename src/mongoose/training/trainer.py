@@ -15,6 +15,7 @@ from mongoose.data.cached_dataset import CachedMoleculeDataset
 from mongoose.data.collate import collate_molecules
 from mongoose.data.dataset import SyntheticMoleculeDataset
 from mongoose.losses.combined import CombinedLoss
+from mongoose.losses.l511 import L511Loss
 from mongoose.model.unet import T2DUNet
 from mongoose.training.config import TrainConfig
 
@@ -33,24 +34,36 @@ class Trainer:
             self.device
         )
 
-        # Loss (V1 rearchitecture: CombinedLoss takes the full scheduler +
-        # detection params from the training config).
-        self.criterion = CombinedLoss(
-            lambda_bp=config.lambda_bp,
-            lambda_vel=config.lambda_vel,
-            lambda_count=config.lambda_count,
-            warmup_epochs=config.warmup_epochs,
-            warmstart_epochs=config.warmstart_epochs,
-            warmstart_fade_epochs=config.warmstart_fade_epochs,
-            softdtw_gamma=config.softdtw_gamma,
-            peakiness_window=config.peakiness_window,
-            nms_threshold=config.nms_threshold,
-            min_blend=config.min_blend,
-            scale_probe=config.scale_probe,
-            scale_bp=config.scale_bp,
-            scale_vel=config.scale_vel,
-            scale_count=config.scale_count,
-        )
+        # Loss: CombinedLoss (V1 rearch) by default; L511Loss (V3 spike) when
+        # ``config.use_l511`` is set. Both have matching ``__call__`` signatures
+        # and emit identical ``details`` dict keys, so the rest of the trainer
+        # and TB logging paths are untouched.
+        if config.use_l511:
+            self.criterion = L511Loss(
+                lambda_511=config.lambda_511,
+                lambda_smooth=config.lambda_smooth,
+                lambda_length=config.lambda_length,
+                warmstart_epochs=config.warmstart_epochs,
+                warmstart_fade_epochs=config.warmstart_fade_epochs,
+                min_blend=max(config.min_blend, 0.05),  # round-6 elastic tether
+            )
+        else:
+            self.criterion = CombinedLoss(
+                lambda_bp=config.lambda_bp,
+                lambda_vel=config.lambda_vel,
+                lambda_count=config.lambda_count,
+                warmup_epochs=config.warmup_epochs,
+                warmstart_epochs=config.warmstart_epochs,
+                warmstart_fade_epochs=config.warmstart_fade_epochs,
+                softdtw_gamma=config.softdtw_gamma,
+                peakiness_window=config.peakiness_window,
+                nms_threshold=config.nms_threshold,
+                min_blend=config.min_blend,
+                scale_probe=config.scale_probe,
+                scale_bp=config.scale_bp,
+                scale_vel=config.scale_vel,
+                scale_count=config.scale_count,
+            )
 
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -317,13 +330,23 @@ class Trainer:
                 for c in warmstart_probe_centers_samples
             ]
 
+        # Option A (T2D-hybrid): pass per-molecule T2D params into the model
+        # when the config opts in AND the batch has them. When the flag is on
+        # but the batch is missing params (mixed-cache edge case), fall back
+        # to standard mode for this batch rather than crashing.
+        t2d_params = None
+        if self.config.use_t2d_hybrid:
+            t2d_params = batch.get("t2d_params")
+            if t2d_params is not None:
+                t2d_params = t2d_params.to(self.device)
+
         with torch.amp.autocast(
             "cuda",
             dtype=torch.bfloat16,
             enabled=self.config.use_amp and self.device.type == "cuda",
         ):
             probe_heatmap, cumulative_bp, raw_velocity, probe_logits = self.model(
-                waveform, conditioning, mask
+                waveform, conditioning, mask, t2d_params=t2d_params
             )
 
         # Loss runs in fp32: probe BCE's numeric stability, focal_loss eps
@@ -401,23 +424,37 @@ class Trainer:
             print(f"  Saved best model: {path} (val_loss={self.best_val_loss:.4f})")
 
     def _maybe_load_checkpoint(self) -> None:
-        """Load the latest checkpoint if one exists in checkpoint_dir."""
+        """Load checkpoint or warm-start model weights.
+
+        Resolution order:
+          1. If ``checkpoint_dir`` contains ``checkpoint_epoch_*.pt`` files,
+             full auto-resume (model + optimizer + scheduler + epoch).
+          2. Else if ``config.init_from`` is set, load ONLY model weights
+             from that path; fresh optimizer/scheduler, start_epoch=0.
+          3. Else no-op (fresh training).
+        """
         checkpoint_dir = Path(self.config.checkpoint_dir)
-        if not checkpoint_dir.exists():
+        existing: list[Path] = []
+        if checkpoint_dir.exists():
+            existing = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
+
+        if existing:
+            latest = existing[-1]
+            print(f"Resuming from checkpoint: {latest}")
+            state = torch.load(latest, map_location=self.device, weights_only=False)
+            self.model.load_state_dict(state["model_state_dict"])
+            self.optimizer.load_state_dict(state["optimizer_state_dict"])
+            self.scheduler.load_state_dict(state["scheduler_state_dict"])
+            self.scaler.load_state_dict(state["scaler_state_dict"])
+            self.start_epoch = state["epoch"]
+            self.best_val_loss = state.get("best_val_loss", float("inf"))
             return
 
-        # Find the latest periodic checkpoint
-        checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
-        if not checkpoints:
-            return
-
-        latest = checkpoints[-1]
-        print(f"Resuming from checkpoint: {latest}")
-
-        state = torch.load(latest, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(state["model_state_dict"])
-        self.optimizer.load_state_dict(state["optimizer_state_dict"])
-        self.scheduler.load_state_dict(state["scheduler_state_dict"])
-        self.scaler.load_state_dict(state["scaler_state_dict"])
-        self.start_epoch = state["epoch"]
-        self.best_val_loss = state.get("best_val_loss", float("inf"))
+        if self.config.init_from is not None:
+            src = Path(self.config.init_from)
+            print(f"Warm-starting model weights from: {src}")
+            state = torch.load(src, map_location=self.device, weights_only=False)
+            self.model.load_state_dict(state["model_state_dict"])
+            # Explicitly DO NOT load optimizer/scheduler/epoch. Fresh training.
+            self.start_epoch = 0
+            self.best_val_loss = float("inf")

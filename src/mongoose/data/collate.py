@@ -106,6 +106,16 @@ def collate_molecules(items: list[dict]) -> dict:
         item["warmstart_probe_centers_samples"] for item in items
     ]
 
+    # Per-molecule T2D params (Option A hybrid). All-or-nothing: if any item
+    # in the batch lacks t2d_params, the batch-level ``t2d_params`` is None
+    # so the trainer can keep the whole batch in standard (non-hybrid) mode.
+    all_have_t2d = all(item.get("t2d_params") is not None for item in items)
+    t2d_params: torch.Tensor | None
+    if all_have_t2d:
+        t2d_params = torch.stack([item["t2d_params"] for item in items])  # [B, 3]
+    else:
+        t2d_params = None
+
     return {
         "waveform": waveforms,
         "conditioning": conditioning,
@@ -116,4 +126,5 @@ def collate_molecules(items: list[dict]) -> dict:
         "warmstart_valid": warmstart_valid,
         "warmstart_probe_centers_samples": warmstart_probe_centers_samples,
         "molecule_uid": [item["molecule_uid"] for item in items],
+        "t2d_params": t2d_params,  # [B, 3] or None
     }

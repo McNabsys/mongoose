@@ -55,9 +55,28 @@ class TrainConfig:
     scale_vel: float = 1.0
     scale_count: float = 1.0
 
+    # V3 spike: physics-informed loss switch. When True the trainer uses
+    # ``L511Loss`` (L_511 + L_smooth + L_length) in place of CombinedLoss.
+    use_l511: bool = False
+    lambda_511: float = 1.0
+    lambda_smooth: float = 0.001
+    lambda_length: float = 0.5
+
+    # Option A (T2D-hybrid): when True, the model's velocity head output is
+    # reinterpreted as a tanh-bounded residual modulating a physics-informed
+    # v_T2D baseline. Requires caches enriched by precompute_t2d_params.py.
+    # Composes cleanly with use_l511 (both supervise the composed velocity).
+    use_t2d_hybrid: bool = False
+
     # Checkpointing
     checkpoint_dir: Path = Path("checkpoints")
     save_every: int = 5  # epochs
+    # Optional warm-start: load ONLY model weights from this path, then
+    # train from epoch 0 with a fresh optimizer and scheduler. Distinct
+    # from auto-resume (which loads all state from checkpoint_dir). Use
+    # this to continue a run with a different loss / epoch count / schedule
+    # while keeping the pre-trained features.
+    init_from: Path | None = None
 
     # Synthetic data (for testing)
     use_synthetic: bool = False

@@ -128,6 +128,56 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override the cosine scheduler's minimum LR (default: 1e-6 from TrainConfig).",
     )
+    parser.add_argument(
+        "--use-l511",
+        action="store_true",
+        help=(
+            "V3 spike: replace CombinedLoss (soft-DTW + teacher-forced L_vel) "
+            "with L511Loss (physics-informed L_511 + L_smooth + L_length). "
+            "Probe head still warmstarts from wfmproc; velocity head is now "
+            "supervised purely by the 511-bp integral constraint."
+        ),
+    )
+    parser.add_argument(
+        "--lambda-511",
+        type=float,
+        default=None,
+        help="Weight on the L_511 term (only meaningful with --use-l511).",
+    )
+    parser.add_argument(
+        "--lambda-smooth",
+        type=float,
+        default=None,
+        help="Weight on L_smooth velocity-TV regularizer (only with --use-l511).",
+    )
+    parser.add_argument(
+        "--lambda-length",
+        type=float,
+        default=None,
+        help="Weight on L_length span anchor (only with --use-l511).",
+    )
+    parser.add_argument(
+        "--init-from",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a checkpoint to warm-start from. Loads only "
+            "model_state_dict; optimizer and scheduler start fresh, and "
+            "training begins at epoch 0. Ignored if --checkpoint-dir already "
+            "contains checkpoints (auto-resume wins). Use to extend a spike "
+            "run with a new cosine schedule, or to start V3 from V1 features."
+        ),
+    )
+    parser.add_argument(
+        "--use-t2d-hybrid",
+        action="store_true",
+        help=(
+            "Option A (T2D-hybrid): velocity head output is reinterpreted as "
+            "a tanh-bounded residual modulating a physics-informed v_T2D "
+            "baseline. Requires each --cache-dir to have a t2d_params.npy "
+            "produced by scripts/precompute_t2d_params.py."
+        ),
+    )
     return parser
 
 
@@ -190,6 +240,30 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         config.scale_probe = args.scale_probe
     if args.min_lr is not None:
         config.min_lr = args.min_lr
+    if args.use_l511:
+        config.use_l511 = True
+    if args.lambda_511 is not None:
+        config.lambda_511 = args.lambda_511
+    if args.lambda_smooth is not None:
+        config.lambda_smooth = args.lambda_smooth
+    if args.lambda_length is not None:
+        config.lambda_length = args.lambda_length
+    if args.init_from is not None:
+        if not args.init_from.exists():
+            raise SystemExit(f"error: --init-from path does not exist: {args.init_from}")
+        config.init_from = Path(args.init_from)
+    if args.use_t2d_hybrid:
+        config.use_t2d_hybrid = True
+        # Verify each cache dir has a t2d_params.npy — fail fast rather than
+        # silently collapsing to non-hybrid at batch time.
+        if cache_dirs is not None:
+            for cd in cache_dirs:
+                if not (cd / "t2d_params.npy").exists():
+                    raise SystemExit(
+                        f"error: --use-t2d-hybrid requires t2d_params.npy in "
+                        f"each cache dir; missing at {cd}. Run "
+                        f"scripts/precompute_t2d_params.py first."
+                    )
 
     return config
 

@@ -8,12 +8,72 @@ import torch.nn.functional as F
 
 from mongoose.model.blocks import FiLMConditioning, ResBlock
 
+# TDB sample rate in Hz (used when computing v_T2D from per-molecule T2D
+# params in hybrid mode).
+TDB_SAMPLE_RATE_HZ = 32000
+# Minimum ``t_from_tail_ms`` to avoid a singularity where the power-law
+# derivative diverges at the trailing edge. 2 ms = 64 samples at 32 kHz —
+# well inside the physically unmodeled tail transition region anyway.
+T2D_MIN_T_FROM_TAIL_MS = 2.0
+# Residual bound for the T2D-hybrid velocity modulation. The residual is
+# tanh'd and scaled to ``[-0.5, +0.5]`` so ``v_final = v_T2D * (1 + residual)``
+# stays within ``[0.5 * v_T2D, 1.5 * v_T2D]`` — physically plausible.
+T2D_RESIDUAL_BOUND = 0.5
+
+
+def compute_v_t2d(
+    mult_const: torch.Tensor,
+    alpha: torch.Tensor,
+    tail_ms: torch.Tensor,
+    T: int,
+    *,
+    sample_rate_hz: int = TDB_SAMPLE_RATE_HZ,
+    min_t_from_tail_ms: float = T2D_MIN_T_FROM_TAIL_MS,
+) -> torch.Tensor:
+    """Compute per-sample v_T2D in bp/sample from per-molecule T2D params.
+
+    Physics (per Oliver 2023 / ``support/T2D.pdf``):
+
+        L(t) = mult_const * t_from_tail_ms ^ alpha + addit_const
+        dL/dt_ms = mult_const * alpha * t_from_tail_ms ^ (alpha - 1)
+        v_T2D_per_sample = dL/dt_ms * sample_period_ms
+
+    ``addit_const`` vanishes in the derivative, so we don't need it here.
+
+    Args:
+        mult_const: [B, 1] per-molecule multiplicative constant.
+        alpha: [B, 1] per-molecule exponent (typically ~0.55).
+        tail_ms: [B, 1] per-molecule trailing-edge time in cached-waveform ms
+            (= ``start_within_tdb_ms + fall_t50``).
+        T: sequence length (number of samples per molecule).
+        sample_rate_hz: Sample rate. Default 32000 (TDB standard).
+        min_t_from_tail_ms: Floor on ``t_from_tail_ms`` to avoid the power-law
+            singularity at the trailing edge. Default 2 ms.
+
+    Returns:
+        [B, T] per-sample v_T2D in bp/sample. Guaranteed finite and positive.
+    """
+    sample_period_ms = 1000.0 / sample_rate_hz
+    sample_ms = torch.arange(T, device=mult_const.device, dtype=mult_const.dtype)
+    sample_ms = sample_ms * sample_period_ms  # [T]
+    # [B, T]
+    t_from_tail_ms = (tail_ms - sample_ms.unsqueeze(0)).clamp(min=min_t_from_tail_ms)
+    # v in bp/sample. Broadcasting: mult/alpha are [B,1], t_from_tail is [B,T].
+    v_t2d = mult_const * alpha * t_from_tail_ms.pow(alpha - 1) * sample_period_ms
+    return v_t2d
+
 
 class T2DUNet(nn.Module):
     """1D U-Net with FiLM conditioning, dilated bottleneck, and multi-head self-attention.
 
-    Forward signature:
-        forward(x, conditioning, mask) -> (probe_heatmap, cumulative_bp, raw_velocity)
+    Two velocity-interpretation modes on ``forward``:
+
+    * **Default** (``t2d_params=None``): velocity head output → softplus →
+      positive raw velocity. Used by V1 and the L_511 spike.
+    * **T2D-hybrid** (``t2d_params`` provided): velocity head output → tanh
+      → residual in ``[-0.5, +0.5]``, composed as
+      ``v_final = v_T2D(t; per-mol params) * (1 + residual)``. Collapses to
+      pure T2D when residual → 0.
     """
 
     # Encoder channel progression per level
@@ -113,20 +173,31 @@ class T2DUNet(nn.Module):
             ResBlock(final_ch, 31),
             nn.Conv1d(final_ch, 1, 1),
         )
-        self.softplus = nn.Softplus()
+        # (Velocity activation is applied inline in forward() — see the
+        # t2d_params branch for hybrid vs softplus handling.)
 
     def forward(
-        self, x: torch.Tensor, conditioning: torch.Tensor, mask: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self,
+        x: torch.Tensor,
+        conditioning: torch.Tensor,
+        mask: torch.Tensor,
+        t2d_params: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run forward pass.
 
         Args:
             x: Waveform tensor [B, 1, T].
             conditioning: Physical observables [B, 6].
             mask: Bool tensor [B, T] (True = valid).
+            t2d_params: Optional [B, 3] tensor of per-molecule T2D params:
+                columns ``[mult_const, alpha, tail_ms]``. When provided,
+                the velocity head output is reinterpreted as a tanh-bounded
+                residual modulating a physics-informed v_T2D baseline
+                (T2D-hybrid mode). When ``None``, standard softplus-velocity
+                behavior (backward compatible with V1 / L_511 spike).
 
         Returns:
-            probe_heatmap [B, T], cumulative_bp [B, T], raw_velocity [B, T].
+            ``(probe_heatmap, cumulative_bp, raw_velocity, probe_logits)``.
         """
         B, _, T_orig = x.shape
 
@@ -181,8 +252,23 @@ class T2DUNet(nn.Module):
         probe = torch.sigmoid(probe_logits)  # [B, T_padded], probabilities
 
         # --- Velocity head ---
-        vel = self.velocity_head(h)  # [B, 1, T_padded]
-        raw_velocity = self.softplus(vel).squeeze(1)  # [B, T_padded], strictly positive
+        vel_logits = self.velocity_head(h).squeeze(1)  # [B, T_padded], raw logits
+
+        if t2d_params is None:
+            # Standard path (V1 / L_511 spike): softplus → positive velocity.
+            raw_velocity = F.softplus(vel_logits)
+        else:
+            # T2D-hybrid path: logits → tanh-bounded residual, modulating v_T2D.
+            # t2d_params: [B, 3] with columns [mult_const, alpha, tail_ms].
+            mult_const = t2d_params[:, 0:1].to(dtype=vel_logits.dtype)  # [B, 1]
+            alpha = t2d_params[:, 1:2].to(dtype=vel_logits.dtype)
+            tail_ms = t2d_params[:, 2:3].to(dtype=vel_logits.dtype)
+
+            v_t2d = compute_v_t2d(
+                mult_const, alpha, tail_ms, T=vel_logits.shape[-1]
+            )  # [B, T_padded]
+            residual = T2D_RESIDUAL_BOUND * torch.tanh(vel_logits)  # [-0.5, +0.5]
+            raw_velocity = v_t2d * (1.0 + residual)  # strictly positive
 
         # Mask velocity and compute cumulative bp
         masked_velocity = raw_velocity * mask.float()  # zero in padded regions

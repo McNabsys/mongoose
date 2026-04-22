@@ -50,6 +50,12 @@ class CachedMoleculeDataset(Dataset):
         self.conditioning_arrays: list[np.ndarray] = []
         self.gt_lists: list[list[dict]] = []
         self.waveform_files: list[np.ndarray] = []  # memory-mapped
+        # Per-cache T2D params array (shape [n_mol, 3] = [mult, alpha, tail_ms]),
+        # or ``None`` if the cache wasn't enriched by precompute_t2d_params.py.
+        # When present, __getitem__ exposes ``t2d_params`` (length-3 float32
+        # tensor) on each item; when absent, that key is ``None``. The
+        # collator then yields a [B, 3] tensor or ``None`` at the batch level.
+        self.t2d_params_arrays: list[np.ndarray | None] = []
 
         for cache_dir in self.cache_dirs:
             with open(cache_dir / "manifest.json") as f:
@@ -75,6 +81,13 @@ class CachedMoleculeDataset(Dataset):
                 )
             else:
                 self.waveform_files.append(np.array([], dtype=np.int16))
+
+            # Optional per-cache T2D params for Option A hybrid training.
+            t2d_path = cache_dir / "t2d_params.npy"
+            if t2d_path.exists():
+                self.t2d_params_arrays.append(np.load(t2d_path))
+            else:
+                self.t2d_params_arrays.append(None)
 
             dir_idx = len(self.manifests) - 1
             for mol_idx in range(len(offsets)):
@@ -148,6 +161,16 @@ class CachedMoleculeDataset(Dataset):
         # Raw warmstart center positions for evaluator use; may be None.
         raw_centers = warmstart_centers  # numpy array (int64) or None
 
+        # Optional per-molecule T2D params for Option A hybrid training.
+        # NaN rows in the precomputed array indicate unresolved molecules;
+        # surface them as None so training code can gate on availability.
+        t2d_row: torch.Tensor | None = None
+        t2d_arr = self.t2d_params_arrays[dir_idx]
+        if t2d_arr is not None:
+            row = t2d_arr[mol_idx]
+            if not np.any(np.isnan(row)):
+                t2d_row = torch.from_numpy(row.astype(np.float32))  # [3]
+
         return {
             "waveform": torch.from_numpy(waveform).unsqueeze(0),  # [1, T]
             "conditioning": torch.from_numpy(conditioning),  # [6]
@@ -161,4 +184,5 @@ class CachedMoleculeDataset(Dataset):
                 if raw_centers is not None else None
             ),  # LongTensor[K] or None
             "molecule_uid": mol_info["uid"],
+            "t2d_params": t2d_row,  # [3] float32 or None
         }
