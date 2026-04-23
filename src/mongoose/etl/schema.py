@@ -109,7 +109,19 @@ CORE_SCHEMA = pa.schema([
     pa.field("molecule_bp_length", pa.int64()),
 
     # -- Derived --
+    # molecule_velocity_bp_per_ms: bp translocated per millisecond; null
+    # for unaligned molecules. molecule_bp_length is derived from assigned
+    # probes, so it's null when no probes aligned.
+    pa.field("molecule_velocity_bp_per_ms", pa.float32()),
+    # local_velocity_group: 0-based index into the M1_probeWidths velocity
+    # groups (75000..85000 = group 0, 85000..95000 = group 1, ...). The
+    # M1 files' velocity unit is not documented in this repo; left null
+    # until the unit→bp/ms conversion is resolved. See probe_widths.py.
     pa.field("local_velocity_group", pa.int16()),
+    # expected_width_at_velocity_bin: wide-peak argmax bin index from
+    # M1_probeWidths for the probe's velocity group. See probe_widths.py
+    # for the known bin→ms calibration gap; this stays as bin index only
+    # until the probe-width axis is documented.
     pa.field("expected_width_at_velocity_bin", pa.int16()),
     pa.field("width_ratio", pa.float32()),
     pa.field("probe_local_density", pa.uint16()),

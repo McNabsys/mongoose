@@ -1,0 +1,81 @@
+# Phase 0 sanity check: STB03-064B-02L58270w05-202G16g
+Run root: C:\git\mongoose\E. coli\Red\STB03-064B-02L58270w05-202G16g\2025-02-19\Remapped\AllCh
+
+## Paths resolved
+  probes.bin         : True  C:\git\mongoose\E. coli\Red\STB03-064B-02L58270w05-202G16g\2025-02-19\Remapped\AllCh\STB03-064B-02L58270w05-202G16g_probes.bin
+  assigns            : True  C:\git\mongoose\E. coli\Red\STB03-064B-02L58270w05-202G16g\2025-02-19\Remapped\AllCh\STB03-064B-02L58270w05-202G16g_probes.txt_probeassignment.assigns
+  referenceMap       : True  C:\git\mongoose\E. coli\Red\STB03-064B-02L58270w05-202G16g\2025-02-19\Remapped\AllCh\STB03-064B-02L58270w05-202G16g_probes.txt_referenceMap.txt
+  transform_path     : C:\git\mongoose\E. coli\Red\STB03-064B-02L58270w05-202G16g\2025-02-19\Remapped\AllCh\STB03-064B-02L58270w05-202G16g_transForm.txt
+  remap_settings_path: C:\git\mongoose\E. coli\Red\STB03-064B-02L58270w05-202G16g\2025-02-19\Remapped\AllCh\STB03-064B-02L58270w05-202G16g.txt_remapSettings.txt
+  version_path       : C:\git\mongoose\E. coli\Red\STB03-064B-02L58270w05-202G16g\2025-02-19\Remapped\AllCh\STB03-064B-02L58270w05-202G16g.txt_version.txt
+  probe_widths_path  : C:\git\mongoose\E. coli\Red\STB03-064B-02L58270w05-202G16g\2025-02-19\Remapped\AllCh\M1_probeWidths.txt
+
+## ETL output
+  total probe rows  : 1,563,181
+  total molecules   : 82,090
+  aligned molecules : 49,272
+  assigned fraction among aligned molecules: 0.373
+  (spec success criterion §299 expects roughly 0.70-0.85;
+   values much lower are worth surfacing to the user.)
+
+## Aligned-molecule assignment-rate distribution
+  frac==0   :  21441  (43.52%)
+  0.00 < f <= 0.25:     93  (0.19%)
+  0.25 < f <= 0.50:    303  (0.61%)
+  0.50 < f <= 0.75:   3515  (7.13%)
+  0.75 < f <= 1.01:  23920  (48.55%)
+
+## WARNING: assigns probe_indices vs probes.bin num_probes mismatch
+  aligned molecules with matching lengths : 27831
+  aligned molecules with mismatch        : 21441
+  mismatch fraction                     : 0.435
+  example: uid=36  len(probe_indices)=8  num_probes=29  align_score=87860
+  example: uid=38  len(probe_indices)=18  num_probes=34  align_score=445666
+  example: uid=47  len(probe_indices)=17  num_probes=27  align_score=82886
+  example: uid=49  len(probe_indices)=6  num_probes=7  align_score=117786
+  example: uid=57  len(probe_indices)=12  num_probes=13  align_score=176887
+
+  Interpretation: spec §93 says assigns should have one ProbeK per detected probe, but a large fraction of aligned rows have fewer ProbeK values than num_probes. The current ETL treats these rows as all-unassigned (conservative), which zeros out labels for ~43% of aligned molecules. Needs user guidance on the correct interpretation before running the full 30-run ETL.
+
+## Top-5 aligned molecules by n_assigned
+  uid=50260  n_assigned=63  align_score=1677715
+  uid=56894  n_assigned=57  align_score=1545507
+  uid=32131  n_assigned=57  align_score=1441847
+  uid=69092  n_assigned=57  align_score=1332268
+  uid=37998  n_assigned=55  align_score=1476797
+
+## Highest-align-score molecule: uid=50260
+  probes in molecule: 63
+  alignment_score   : 1677715
+  direction         : -1
+  num_matched       : 63 / 63
+
+## Check 1: ref_idx -> ref_genomic_pos_bp (first 5 assigned probes)
+  probe_idx=0  ref_idx=565  reported_bp=3,369,280  refmap[ref_idx-1]=3,369,280  OK
+  probe_idx=1  ref_idx=564  reported_bp=3,367,181  refmap[ref_idx-1]=3,367,181  OK
+  probe_idx=2  ref_idx=563  reported_bp=3,363,608  refmap[ref_idx-1]=3,363,608  OK
+  probe_idx=3  ref_idx=562  reported_bp=3,357,344  refmap[ref_idx-1]=3,357,344  OK
+  probe_idx=4  ref_idx=561  reported_bp=3,351,261  refmap[ref_idx-1]=3,351,261  OK
+
+## Check 2: probes.bin ProbeK ordering
+  assigns row ProbeK tuple length: 63
+  ETL row     ref_idx  tuple length: 63
+  equal: True  (first 10 expected=(565, 564, 563, 562, 561, 560, 559, 558, 557, 555), reported=(565, 564, 563, 562, 561, 560, 559, 558, 557, 555))
+
+## Check 3: molecule_bp_length vs refmap span of assigned probes
+  assigned bp span: 363,857  column: 363,857  OK
+
+## Check 4: t2d_predicted_bp_pos (per-probe bp from legacy T2D)
+  finite: 63 / 63  min=9353.2  max=351691.4
+  monotone in probe order: True  (diff sign counts: pos=0 neg=62 zero=0)
+
+## Check 5: probe_local_density + gap columns (first 5 probes)
+  idx=0  center_ms=13.47  prev_gap=nan  next_gap=8.125  density(+/-50ms)=3
+  idx=1  center_ms=21.59  prev_gap=8.125  next_gap=17.3125  density(+/-50ms)=3
+  idx=2  center_ms=38.90  prev_gap=17.3125  next_gap=33.65625  density(+/-50ms)=4
+  idx=3  center_ms=72.56  prev_gap=33.65625  next_gap=32.90625  density(+/-50ms)=4
+  idx=4  center_ms=105.47  prev_gap=32.90625  next_gap=11.75  density(+/-50ms)=5
+
+## Summary
+  failures: 0
+  STATUS: PASS
