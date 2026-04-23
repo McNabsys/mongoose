@@ -17,6 +17,7 @@ class MoleculeAssignment:
     second_best_score: int
     stretch_factor: float
     stretch_offset: float
+    weight: float
     probe_indices: tuple[int, ...]  # reference probe indices (1-based), 0 = unmatched
 
 
@@ -43,7 +44,7 @@ def load_assigns(path: str | Path) -> list[MoleculeAssignment]:
             second_best = int(parts[4])
             stretch_factor = float(parts[5])
             stretch_offset = float(parts[6])
-            # parts[7] is Weight -- skip it
+            weight = float(parts[7])
             probe_indices = tuple(int(p) for p in parts[8:] if p.strip())
             assignments.append(MoleculeAssignment(
                 ref_index=ref_index,
@@ -53,6 +54,7 @@ def load_assigns(path: str | Path) -> list[MoleculeAssignment]:
                 second_best_score=second_best,
                 stretch_factor=stretch_factor,
                 stretch_offset=stretch_offset,
+                weight=weight,
                 probe_indices=probe_indices,
             ))
     return assignments
