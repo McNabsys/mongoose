@@ -68,6 +68,22 @@ class TrainConfig:
     # Composes cleanly with use_l511 (both supervise the composed velocity).
     use_t2d_hybrid: bool = False
 
+    # When True, the velocity head receives the (sigmoided, detached) probe
+    # heatmap as an additional input channel. Lets vel head learn explicit
+    # probe-state-conditioned corrections (e.g., slow inside probes). Changes
+    # the architecture — old V1 / spike checkpoints can't load when this
+    # flag flips.
+    probe_aware_velocity: bool = False
+
+    # Mixed-supervision alignment loss: for high-confidence remapped
+    # molecules (matched/total ratio >= ``align_min_confidence``), add a
+    # direct L1 loss on cum_bp at probe centers vs reference_bp_positions.
+    # Gives the residual a strong supervised signal at trusted probes
+    # without capping the model to remapping accuracy globally (low-
+    # confidence molecules are still trained on physics constraints alone).
+    lambda_align: float = 0.0  # 0 disables
+    align_min_confidence: float = 0.7  # min match-ratio
+
     # Checkpointing
     checkpoint_dir: Path = Path("checkpoints")
     save_every: int = 5  # epochs
@@ -77,6 +93,15 @@ class TrainConfig:
     # this to continue a run with a different loss / epoch count / schedule
     # while keeping the pre-trained features.
     init_from: Path | None = None
+
+    # wandb experiment tracking (opt-in). When True, the Trainer initializes
+    # a wandb run and streams per-epoch metrics, hyperparameters, git commit,
+    # and GPU info to a dashboard at wandb.ai. Requires the ``WANDB_API_KEY``
+    # env var (or a prior ``wandb login``). Off by default so offline runs
+    # and runs without an API key are unaffected.
+    use_wandb: bool = False
+    wandb_project: str = "mongoose-v3"
+    wandb_run_name: str | None = None
 
     # Synthetic data (for testing)
     use_synthetic: bool = False

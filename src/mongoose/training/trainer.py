@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import subprocess
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,29 @@ from mongoose.training.config import TrainConfig
 logger = logging.getLogger(__name__)
 
 
+def _git_commit_hash() -> str:
+    """Return the current git HEAD SHA, or 'unknown' if unavailable."""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(Path(__file__).resolve().parent),
+            stderr=subprocess.DEVNULL,
+        )
+        return out.decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "unknown"
+
+
+def _gpu_info(device: torch.device) -> dict[str, Any]:
+    """Return a small dict describing the compute device for wandb config."""
+    info: dict[str, Any] = {"device": str(device)}
+    if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+        info["gpu_name"] = torch.cuda.get_device_name(0)
+        info["gpu_count"] = torch.cuda.device_count()
+        info["cuda_version"] = torch.version.cuda
+    return info
+
+
 class Trainer:
     """Trains the T2D U-Net model."""
 
@@ -30,9 +55,11 @@ class Trainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Model
-        self.model = T2DUNet(config.in_channels, config.conditioning_dim).to(
-            self.device
-        )
+        self.model = T2DUNet(
+            config.in_channels,
+            config.conditioning_dim,
+            probe_aware_velocity=config.probe_aware_velocity,
+        ).to(self.device)
 
         # Loss: CombinedLoss (V1 rearch) by default; L511Loss (V3 spike) when
         # ``config.use_l511`` is set. Both have matching ``__call__`` signatures
@@ -43,6 +70,8 @@ class Trainer:
                 lambda_511=config.lambda_511,
                 lambda_smooth=config.lambda_smooth,
                 lambda_length=config.lambda_length,
+                lambda_align=config.lambda_align,
+                align_min_confidence=config.align_min_confidence,
                 warmstart_epochs=config.warmstart_epochs,
                 warmstart_fade_epochs=config.warmstart_fade_epochs,
                 min_blend=max(config.min_blend, 0.05),  # round-6 elastic tether
@@ -96,8 +125,45 @@ class Trainer:
         tb_dir.mkdir(parents=True, exist_ok=True)
         self.writer: SummaryWriter | None = SummaryWriter(log_dir=str(tb_dir))
 
+        # wandb: opt-in via config.use_wandb. Held as ``self._wandb`` so test
+        # code can monkeypatch the module and so ``fit()`` can skip cleanly
+        # when disabled. Init is best-effort — login/network failure logs a
+        # warning and continues without wandb (local run is unaffected).
+        self._wandb: Any = None
+        if config.use_wandb:
+            self._init_wandb()
+
         # Load checkpoint if one exists
         self._maybe_load_checkpoint()
+
+    def _init_wandb(self) -> None:
+        """Initialize a wandb run. Called only when config.use_wandb is True."""
+        try:
+            import wandb
+        except ImportError:
+            logger.warning(
+                "config.use_wandb=True but wandb is not installed; "
+                "skipping wandb logging. Run `pip install wandb`."
+            )
+            return
+
+        cfg = self.config
+        wandb_config = {k: str(v) if isinstance(v, Path) else v for k, v in asdict(cfg).items()}
+        wandb_config["git_commit"] = _git_commit_hash()
+        wandb_config.update(_gpu_info(self.device))
+
+        try:
+            run = wandb.init(
+                project=cfg.wandb_project,
+                name=cfg.wandb_run_name,
+                config=wandb_config,
+            )
+        except Exception as exc:  # pragma: no cover - network / auth failure
+            logger.warning("wandb.init failed (%s); continuing without wandb.", exc)
+            return
+
+        self._wandb = wandb
+        logger.info("wandb run initialized: %s", getattr(run, "name", "?"))
 
     def _build_dataloaders(self) -> None:
         """Build train and optional validation dataloaders."""
@@ -192,11 +258,14 @@ class Trainer:
 
             self._log(epoch, train_metrics, val_metrics)
             self._tb_log(epoch, combined)
+            self._wandb_log(epoch, combined, train_metrics)
             self._maybe_save_checkpoint(epoch, val_metrics)
 
         if self.writer is not None:
             self.writer.flush()
             self.writer.close()
+        if self._wandb is not None:
+            self._wandb.finish()
 
     def _tb_log(self, epoch: int, combined: dict[str, Any]) -> None:
         """Emit per-epoch scalars to TensorBoard (no-op if writer is None)."""
@@ -214,6 +283,22 @@ class Trainer:
         w.add_scalar("schedule/blend", blend, epoch)
         w.flush()
 
+    def _wandb_log(
+        self,
+        epoch: int,
+        combined: dict[str, Any],
+        train_metrics: dict[str, float],
+    ) -> None:
+        """Emit per-epoch scalars to wandb (no-op if disabled)."""
+        if self._wandb is None:
+            return
+        payload = dict(combined)
+        payload["blend"] = float(getattr(self.criterion, "_warmstart_blend", 0.0))
+        # Extra L511Loss-only fields; 0.0 when CombinedLoss is in use.
+        payload["train_align_raw"] = float(train_metrics.get("align_raw", 0.0))
+        payload["train_n_align_active"] = float(train_metrics.get("n_align_active", 0))
+        self._wandb.log(payload, step=epoch)
+
     def _train_one_epoch(self, epoch: int) -> dict[str, float]:
         """Run one training epoch."""
         self.model.train()
@@ -226,6 +311,8 @@ class Trainer:
         total_bp_raw = 0.0
         total_vel_raw = 0.0
         total_count_raw = 0.0
+        total_align_raw = 0.0
+        total_n_align_active = 0
         num_batches = 0
 
         for batch in self.train_loader:
@@ -249,6 +336,8 @@ class Trainer:
             total_bp_raw += float(details["bp_raw"])
             total_vel_raw += float(details["vel_raw"])
             total_count_raw += float(details["count_raw"])
+            total_align_raw += float(details.get("align_raw", 0.0))
+            total_n_align_active += int(details.get("n_align_active", 0))
             num_batches += 1
 
         n = max(num_batches, 1)
@@ -262,6 +351,8 @@ class Trainer:
             "bp_raw": total_bp_raw / n,
             "vel_raw": total_vel_raw / n,
             "count_raw": total_count_raw / n,
+            "align_raw": total_align_raw / n,
+            "n_align_active": total_n_align_active,
         }
 
     @torch.no_grad()

@@ -1,0 +1,12 @@
+  WARNING: skipped 93 molecules in run STB03-063B-02L58270w05-433B23b (no warmstart GT, too few probes, or length mismatch)
+  WARNING: skipped 60 molecules in run STB03-064D-02L58270w05-433H09d (no warmstart GT, too few probes, or length mismatch)
+  WARNING: skipped 37 molecules in run STB03-065H-02L58270w05-433H09j (no warmstart GT, too few probes, or length mismatch)
+
+=== BP-Interval Accuracy (anchored to wfmproc centers) ===
+  Overall: n_intervals=1541510  median_rel=0.2732  p95_rel=2.2555  p99_rel=8.0286
+  Overall abs: median=1068.6 bp  p95=8991.5 bp  p99=16318.5 bp  corr(ref,pred)=0.6669
+  Run STB03-063B-02L58270w05-433B23b: n_int=817311  median_rel=0.3006  p95_rel=2.7094  corr=0.6355
+  Run STB03-064D-02L58270w05-433H09d: n_int=487785  median_rel=0.2482  p95_rel=1.8511  corr=0.6904
+  Run STB03-065H-02L58270w05-433H09j: n_int=236414  median_rel=0.2414  p95_rel=1.5048  corr=0.7282
+
+  Wrote: phase6_holdout_eval\bp_intervals.json

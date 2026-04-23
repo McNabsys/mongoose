@@ -115,3 +115,16 @@ gcloud storage cp /var/log/mongoose-train.log "$BUCKET/run_artifacts/train.log" 
 gcloud storage cp /var/log/mongoose-startup.log "$BUCKET/run_artifacts/startup.log" || true
 
 echo "=== Training complete ==="
+
+# ---- 11. Self-delete so we don't leak billing if user forgets ----
+# The Compute Engine default service account has Editor role which
+# includes compute.instances.delete on its own VM. If this fails (e.g.
+# scope or permissions issue), the VM stays up and the user can manually
+# delete via the console or scripts/cloud/teardown.sh.
+INSTANCE_NAME=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/name)
+ZONE=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}')
+echo "Self-deleting VM $INSTANCE_NAME in $ZONE in 60 seconds (gives time to inspect logs) ..."
+gcloud storage cp /var/log/mongoose-startup.log "$BUCKET/run_artifacts/startup_pre_delete.log" || true
+sleep 60
+gcloud --quiet compute instances delete "$INSTANCE_NAME" --zone="$ZONE" 2>&1 || \
+    echo "WARNING: self-delete failed. Manually delete with: gcloud compute instances delete $INSTANCE_NAME --zone=$ZONE --quiet"

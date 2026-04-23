@@ -178,6 +178,61 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "produced by scripts/precompute_t2d_params.py."
         ),
     )
+    parser.add_argument(
+        "--probe-aware-velocity",
+        action="store_true",
+        help=(
+            "Architecture-level: feed the (sigmoided, detached) probe "
+            "heatmap as an additional input channel into the velocity "
+            "head. Helps it learn probe-state-conditioned corrections. "
+            "Old V1 / spike checkpoints can't warm-start when this flips."
+        ),
+    )
+    parser.add_argument(
+        "--lambda-align",
+        type=float,
+        default=None,
+        help=(
+            "Mixed-supervision alignment loss weight. When > 0 and the "
+            "molecule's match ratio >= --align-min-confidence, an L1 loss "
+            "is added on cum_bp at probe centers vs reference_bp_positions. "
+            "0 disables (default)."
+        ),
+    )
+    parser.add_argument(
+        "--align-min-confidence",
+        type=float,
+        default=None,
+        help=(
+            "Min match ratio (matched/total ref probes) for a molecule to "
+            "receive alignment supervision. Default 0.7."
+        ),
+    )
+    parser.add_argument(
+        "--use-wandb",
+        action="store_true",
+        help=(
+            "Stream per-epoch metrics, hyperparameters, git commit hash, and "
+            "GPU info to a wandb.ai dashboard. Requires the WANDB_API_KEY env "
+            "var (get one at https://wandb.ai/authorize). Off by default — "
+            "existing offline runs are unchanged when this flag is omitted."
+        ),
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=None,
+        help="wandb project name (default: 'mongoose-v3'). Only used with --use-wandb.",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help=(
+            "Name for this wandb run. If omitted, wandb auto-generates one. "
+            "Only used with --use-wandb."
+        ),
+    )
     return parser
 
 
@@ -264,6 +319,18 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
                         f"each cache dir; missing at {cd}. Run "
                         f"scripts/precompute_t2d_params.py first."
                     )
+    if args.probe_aware_velocity:
+        config.probe_aware_velocity = True
+    if args.lambda_align is not None:
+        config.lambda_align = args.lambda_align
+    if args.align_min_confidence is not None:
+        config.align_min_confidence = args.align_min_confidence
+    if args.use_wandb:
+        config.use_wandb = True
+    if args.wandb_project is not None:
+        config.wandb_project = args.wandb_project
+    if args.wandb_run_name is not None:
+        config.wandb_run_name = args.wandb_run_name
 
     return config
 

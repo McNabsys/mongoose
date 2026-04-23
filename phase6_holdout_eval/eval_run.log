@@ -1,0 +1,9 @@
+
+=== Peak-Match F1 @ tolerance=50.0 samples ===
+  Overall (sum-of-counts): P=0.816  R=0.990  F1=0.894
+  Per-molecule mean:       P=0.839  R=0.989  F1=0.900  (n=115774)
+  Run STB03-063B-02L58270w05-433B23b: F1_sum=0.882  F1_mol=0.889  (n=63247)
+  Run STB03-064D-02L58270w05-433H09d: F1_sum=0.915  F1_mol=0.918  (n=34384)
+  Run STB03-065H-02L58270w05-433H09j: F1_sum=0.897  F1_mol=0.902  (n=18143)
+
+  Wrote: phase6_holdout_eval\peak_match.json

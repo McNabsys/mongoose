@@ -203,3 +203,62 @@ def test_hybrid_mode_gradient_flows_to_residual() -> None:
     assert grads, "velocity_head has no grads — residual disconnected from graph"
     total_grad = sum(g.abs().sum().item() for g in grads)
     assert total_grad > 0, f"velocity_head grads are zero (sum={total_grad})"
+
+
+# -----------------------------------------------------------------------
+# probe_aware_velocity flag
+# -----------------------------------------------------------------------
+def test_probe_aware_velocity_extends_input_channel() -> None:
+    """With probe_aware_velocity=True, vel head accepts an extra channel."""
+    torch.manual_seed(0)
+    model = T2DUNet(in_channels=1, conditioning_dim=6, probe_aware_velocity=True)
+    # First module of velocity_head should be the channel-merging Conv1d
+    # taking 33 channels in (32 backbone + 1 probe) and emitting 32.
+    first = model.velocity_head[0]
+    assert isinstance(first, torch.nn.Conv1d)
+    assert first.in_channels == 33, f"expected 33 in_channels, got {first.in_channels}"
+    assert first.out_channels == 32
+
+
+def test_probe_aware_forward_runs_and_is_positive() -> None:
+    """End-to-end forward with probe-aware vel + hybrid path."""
+    torch.manual_seed(0)
+    model = T2DUNet(in_channels=1, conditioning_dim=6, probe_aware_velocity=True)
+    model.eval()
+    x = torch.randn(2, 1, 128)
+    cond = torch.randn(2, 6)
+    mask = torch.ones(2, 128, dtype=torch.bool)
+    t2d_params = torch.tensor([[6343.0, 0.558, 4.0], [6500.0, 0.55, 4.0]])
+    with torch.no_grad():
+        probe, cum_bp, raw_vel, _ = model(x, cond, mask, t2d_params=t2d_params)
+    assert raw_vel.shape == (2, 128)
+    assert torch.all(raw_vel >= 0)
+    assert torch.all(torch.isfinite(raw_vel))
+
+
+def test_probe_aware_does_not_backprop_to_probe_head() -> None:
+    """probe.detach() before concat means vel-head loss must NOT update
+    probe_head weights (only L_probe should drive probe_head training)."""
+    torch.manual_seed(0)
+    model = T2DUNet(in_channels=1, conditioning_dim=6, probe_aware_velocity=True)
+    model.train()
+    x = torch.randn(1, 1, 128)
+    cond = torch.randn(1, 6)
+    mask = torch.ones(1, 128, dtype=torch.bool)
+    t2d_params = torch.tensor([[6343.0, 0.558, 4.0]])
+
+    _, _, raw_vel, _ = model(x, cond, mask, t2d_params=t2d_params)
+    loss = raw_vel.sum()
+    loss.backward()
+
+    # probe_head's grads should be ZERO since the only path to probe_head
+    # was through the detached concat. Backbone grads are fine.
+    probe_grads = [
+        p.grad for p in model.probe_head.parameters() if p.grad is not None
+    ]
+    if probe_grads:  # if grads were even allocated
+        total = sum(g.abs().sum().item() for g in probe_grads)
+        assert total == 0.0, (
+            f"probe_head got velocity-loss gradient (sum={total}); "
+            "detach() in probe-aware path is broken"
+        )

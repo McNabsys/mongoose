@@ -1,0 +1,46 @@
+{
+  "method": "anchored-to-wfmproc-centers",
+  "overall": {
+    "n_molecules": 64,
+    "n_intervals": 758,
+    "n_skipped": 0,
+    "abs_err_bp": {
+      "n": 758,
+      "median": 1170.9609375,
+      "mean": 2429.0628439870547,
+      "p95": 8828.1203125,
+      "p99": 15065.335234374976
+    },
+    "rel_err": {
+      "n": 758,
+      "median": 0.27862718228566064,
+      "mean": 0.6433176098471726,
+      "p95": 2.243692797876085,
+      "p99": 7.885355325024026
+    },
+    "correlation_ref_pred": 0.6905992003831692
+  },
+  "per_run": {
+    "STB03-063B-02L58270w05-433B23b": {
+      "n_molecules": 64,
+      "n_intervals": 758,
+      "n_skipped": 0,
+      "abs_err_bp": {
+        "n": 758,
+        "median": 1170.9609375,
+        "mean": 2429.0628439870547,
+        "p95": 8828.1203125,
+        "p99": 15065.335234374976
+      },
+      "rel_err": {
+        "n": 758,
+        "median": 0.27862718228566064,
+        "mean": 0.6433176098471726,
+        "p95": 2.243692797876085,
+        "p99": 7.885355325024026
+      },
+      "correlation_ref_pred": 0.6905992003831692
+    }
+  },
+  "checkpoint": "phase6_checkpoints\\best_model.pt"
+}

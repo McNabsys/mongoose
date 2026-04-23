@@ -1,0 +1,13 @@
+Evaluating T2D baseline ...
+Evaluating checkpoint_epoch_000 ...
+Evaluating checkpoint_epoch_001 ...
+Evaluating checkpoint_epoch_002 ...
+
+| Method          | STB03-063B med / p95 | STB03-064D med / p95 | STB03-065H med / p95 | Overall med / p95 / corr |
+|-----------------|------------------------|------------------------|------------------------|---------------------------|
+| T2D             |   17.1% /  247.3% |   13.6% /  157.7% |   17.9% /   96.7% |   16.2% /  167.2% / 0.721 |
+| checkpoint_epoch_000 |   19.1% /  274.8% |   15.0% /  180.4% |   14.7% /  108.7% |   16.2% /  188.0% / 0.717 |
+| checkpoint_epoch_001 |   19.0% /  276.4% |   14.7% /  179.7% |   14.8% /  106.9% |   16.2% /  187.7% / 0.715 |
+| checkpoint_epoch_002 |   19.2% /  272.6% |   15.0% /  177.7% |   15.2% /  105.8% |   16.4% /  185.4% / 0.717 |
+
+Wrote phase6_holdout_eval\comparison_option_a_smoke_v2.json

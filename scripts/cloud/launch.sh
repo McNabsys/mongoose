@@ -21,22 +21,57 @@ INSTANCE_NAME="mongoose-option-a-$(date +%Y%m%d-%H%M)"
 WORKTREE="C:/git/mongoose/.claude/worktrees/peaceful-rubin-bfb7a9"
 STARTUP_SCRIPT="$WORKTREE/scripts/cloud/vm_startup.sh"
 
+# Machine type. Default a3-highgpu-1g (H100 80GB). Override via env var
+# to e.g. a2-ultragpu-1g (A100 80GB) when H100 capacity is constrained.
+MACHINE_TYPE="${MACHINE_TYPE:-a3-highgpu-1g}"
+
 # DL VM image family. As of 2026-04, 'common-cu124' is the current
 # stable CUDA 12.4 image family with PyTorch preinstalled. Override via
 # IMAGE_FAMILY env var if that's rolled forward.
 IMAGE_FAMILY="${IMAGE_FAMILY:-common-cu124}"
 
-# Zones to try, ordered by typical H100 availability. Extend as needed.
-ZONES=(
-    us-central1-a us-central1-b us-central1-c us-central1-f
-    us-east5-a us-east5-b us-east5-c
-    us-east4-a us-east4-b us-east4-c
-    us-west4-a us-west4-b us-west4-c
-    europe-west4-a europe-west4-b europe-west4-c
-)
+# Zones to try. Default is the broad H100 search across multiple regions.
+# When using A100 (a2-*), restrict to us-central1 only (where quota lives)
+# unless ZONES is overridden in env.
+if [ -z "${ZONES:-}" ]; then
+    case "$MACHINE_TYPE" in
+        a2-*)
+            ZONES=(us-central1-a us-central1-b us-central1-c us-central1-f)
+            ;;
+        *)
+            ZONES=(
+                us-central1-a us-central1-b us-central1-c us-central1-f
+                us-east5-a us-east5-b us-east5-c
+                us-east4-a us-east4-b us-east4-c
+                us-west4-a us-west4-b us-west4-c
+                europe-west4-a europe-west4-b europe-west4-c
+            )
+            ;;
+    esac
+else
+    # Allow comma- or space-separated ZONES env var.
+    IFS=', ' read -ra ZONES <<< "$ZONES"
+fi
 
-MAX_ROUNDS=20
-SLEEP_BETWEEN_ROUNDS=60
+MAX_ROUNDS="${MAX_ROUNDS:-60}"
+SLEEP_BETWEEN_ROUNDS="${SLEEP_BETWEEN_ROUNDS:-60}"
+
+# SPOT toggle. Default true. Set SPOT=false in the environment to use
+# on-demand provisioning ($11/hr vs $3/hr but always available — no
+# stockouts). Use as a fallback when the spot retry loop exhausts.
+SPOT="${SPOT:-true}"
+if [ "$SPOT" = "true" ]; then
+    # Spot's --instance-termination-action=STOP implicitly handles the
+    # accelerator-VM "no live-migration" requirement.
+    PROVISIONING_FLAGS="--provisioning-model=SPOT --instance-termination-action=STOP"
+    echo "Provisioning: SPOT (cheaper but can be preempted)"
+else
+    # On-demand: must explicitly set --maintenance-policy=TERMINATE
+    # because GPU VMs can't be live-migrated. Without this, GCP defaults
+    # to MIGRATE and rejects the request.
+    PROVISIONING_FLAGS="--maintenance-policy=TERMINATE"
+    echo "Provisioning: ON-DEMAND (~3.5x more expensive but guaranteed)"
+fi
 
 # Reusable create command as a function — differs only by zone.
 try_create() {
@@ -44,9 +79,8 @@ try_create() {
     echo "[$(date +%H:%M:%S)] Trying zone $ZONE ..."
     gcloud compute instances create "$INSTANCE_NAME" \
         --zone="$ZONE" \
-        --machine-type=a3-highgpu-1g \
-        --provisioning-model=SPOT \
-        --instance-termination-action=STOP \
+        --machine-type="$MACHINE_TYPE" \
+        $PROVISIONING_FLAGS \
         --image-family="$IMAGE_FAMILY" \
         --image-project=deeplearning-platform-release \
         --boot-disk-size=300GB \

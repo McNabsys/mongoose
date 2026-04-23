@@ -166,23 +166,29 @@ class L511Loss:
         lambda_511: float = 1.0,
         lambda_smooth: float = 0.001,
         lambda_length: float = 0.5,
+        lambda_align: float = 0.0,
+        align_min_confidence: float = 0.7,
         warmstart_epochs: int = 5,
         warmstart_fade_epochs: int = 2,
         min_blend: float = 0.05,
         scale_511: float = 511.0**2,  # residual is (~bp)^2; normalize by 511^2
         scale_smooth: float = 1.0,
         scale_length: float = 1.0e9,  # span residual can be (~30000 bp)^2 on long molecules
+        scale_align: float = 1.0e6,  # L1 in bp, typical interval ~1000 bp
         tag_width_bp: float = TAG_WIDTH_BP,
     ) -> None:
         self.lambda_511 = lambda_511
         self.lambda_smooth = lambda_smooth
         self.lambda_length = lambda_length
+        self.lambda_align = float(lambda_align)
+        self.align_min_confidence = float(align_min_confidence)
         self.warmstart_epochs = int(warmstart_epochs)
         self.warmstart_fade_epochs = int(warmstart_fade_epochs)
         self.min_blend = float(min_blend)
         self.scale_511 = float(scale_511)
         self.scale_smooth = float(scale_smooth)
         self.scale_length = float(scale_length)
+        self.scale_align = float(scale_align)
         self.tag_width_bp = float(tag_width_bp)
         self._warmstart_blend: float = 1.0
 
@@ -231,6 +237,7 @@ class L511Loss:
         """
         from mongoose.losses.centernet_focal import centernet_focal_loss
         from mongoose.losses.peaks import measure_peak_widths_samples
+        import torch.nn.functional as F
 
         device = pred_heatmap.device
         batch_size = pred_heatmap.shape[0]
@@ -240,6 +247,10 @@ class L511Loss:
         l511_terms: list[torch.Tensor] = []
         smooth_terms: list[torch.Tensor] = []
         length_terms: list[torch.Tensor] = []
+        # Mixed-supervision alignment loss (only populated when lambda_align>0
+        # AND molecule's match ratio exceeds align_min_confidence).
+        align_terms: list[torch.Tensor] = []
+        n_align_active = 0  # number of molecules contributing to alignment
 
         for b in range(batch_size):
             pred_h_b = pred_heatmap[b]
@@ -286,6 +297,29 @@ class L511Loss:
                 ref_bp = reference_bp_positions_list[b]
                 length_terms.append(l_length_span(raw_v_b, gt_centers, ref_bp))
 
+                # ---------- L_align (mixed supervision, gated by confidence) ----------
+                # For high-confidence remapped molecules, add a direct L1 loss
+                # on cum_bp at probe centers vs reference_bp_positions (anchored
+                # at the first probe so the absolute genome offset doesn't
+                # matter; only relative bp positions across probes do).
+                if self.lambda_align > 0 and ref_bp.numel() == gt_centers.numel():
+                    n_ref_b = float(n_ref_probes[b].item())
+                    n_matched = float(gt_centers.numel())
+                    confidence = n_matched / max(n_ref_b, 1.0)
+                    if confidence >= self.align_min_confidence:
+                        # cum_bp is the cumulative integral of raw_velocity.
+                        # Recompute here to keep gradient path through raw_v_b.
+                        cum_bp_b = torch.cumsum(raw_v_b * mask_b.to(raw_v_b.dtype), dim=-1)
+                        # Clamp center indices defensively.
+                        T = cum_bp_b.shape[-1]
+                        c = gt_centers.clamp(min=0, max=T - 1)
+                        pred_at = cum_bp_b[c]  # [K]
+                        # Anchor predictions and reference at the first probe.
+                        pred_norm = pred_at - pred_at[0]
+                        ref_norm = (ref_bp - ref_bp[0]).abs().to(pred_norm.dtype)
+                        align_terms.append(F.l1_loss(pred_norm, ref_norm))
+                        n_align_active += 1
+
             # ---------- L_smooth (always, needs only velocity + mask) ----------
             smooth_terms.append(l_smooth_velocity(raw_v_b, mask_b))
 
@@ -294,30 +328,39 @@ class L511Loss:
         l511_loss_raw = torch.stack(l511_terms).mean() if l511_terms else zero
         smooth_loss = torch.stack(smooth_terms).mean() if smooth_terms else zero
         length_loss_raw = torch.stack(length_terms).mean() if length_terms else zero
+        align_loss_raw = torch.stack(align_terms).mean() if align_terms else zero
 
         # Scaled components — keep magnitudes comparable for TB readability.
         scaled_511 = l511_loss_raw / self.scale_511
         scaled_smooth = smooth_loss / self.scale_smooth
         scaled_length = length_loss_raw / self.scale_length
+        scaled_align = align_loss_raw / self.scale_align
+
+        # L_align is folded into the "bp" slot (both push pred bp toward
+        # ground truth at probes); we keep its raw value separately for log.
+        bp_total_scaled = scaled_511 + self.lambda_align * scaled_align
 
         total = (
             probe_loss
             + self.lambda_511 * scaled_511
             + self.lambda_smooth * scaled_smooth
             + self.lambda_length * scaled_length
+            + self.lambda_align * scaled_align
         )
 
         # Key mapping: map each V3 physics term into the existing slot name
         # so the trainer's logging doesn't need to change.
         details: dict[str, float] = {
             "probe": float(probe_loss.detach().item()),
-            "bp": float(scaled_511.detach().item()),
+            "bp": float(bp_total_scaled.detach().item()),
             "vel": float(scaled_smooth.detach().item()),
             "count": float(scaled_length.detach().item()),
             "probe_raw": float(probe_loss.detach().item()),
             "bp_raw": float(l511_loss_raw.detach().item()),  # mean sq residual (bp^2)
             "vel_raw": float(smooth_loss.detach().item()),
             "count_raw": float(length_loss_raw.detach().item()),  # span residual (bp^2)
+            "align_raw": float(align_loss_raw.detach().item()),  # mean L1 (bp)
+            "n_align_active": n_align_active,
             "warmstart_blend": blend,
         }
         return total, details

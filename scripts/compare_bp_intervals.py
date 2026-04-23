@@ -67,6 +67,12 @@ def _per_cache_eval_v3(
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
+    # Hybrid checkpoints (--use-t2d-hybrid) require t2d_params at inference
+    # because the velocity head is interpreted as a tanh residual instead of
+    # a softplus magnitude. Calling forward() without t2d_params on a hybrid
+    # checkpoint produces garbage. Detect via the saved config.
+    use_hybrid = bool(getattr(config, "use_t2d_hybrid", False))
+
     dataset = CachedMoleculeDataset([cache_dir], augment=False)
     loader = torch.utils.data.DataLoader(
         dataset,
@@ -85,9 +91,22 @@ def _per_cache_eval_v3(
         waveform = batch["waveform"].to(device)
         conditioning = batch["conditioning"].to(device)
         mask = batch["mask"].to(device)
+        t2d_params = None
+        if use_hybrid:
+            t2d_params = batch.get("t2d_params")
+            if t2d_params is None:
+                # Cache wasn't enriched. Hybrid checkpoint cannot run on it.
+                raise RuntimeError(
+                    f"checkpoint {checkpoint_path} is T2D-hybrid but cache "
+                    f"{cache_dir} has no t2d_params.npy. Run "
+                    f"scripts/precompute_t2d_params.py first."
+                )
+            t2d_params = t2d_params.to(device)
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                _probe, cum_bp, _vel, _logits = model(waveform, conditioning, mask)
+                _probe, cum_bp, _vel, _logits = model(
+                    waveform, conditioning, mask, t2d_params=t2d_params
+                )
             cum_bp = cum_bp.float()
 
         b = waveform.shape[0]

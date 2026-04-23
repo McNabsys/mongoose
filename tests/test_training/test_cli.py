@@ -110,3 +110,31 @@ def test_parser_checkpoint_dir_as_path(tmp_path):
     config = config_from_args(args)
     assert isinstance(config.checkpoint_dir, Path)
     assert config.checkpoint_dir == tmp_path / "ckpts"
+
+
+def test_wandb_flag_defaults_off():
+    """Backward compat: without --use-wandb, wandb is disabled."""
+    parser = build_arg_parser()
+    args = parser.parse_args(["--synthetic"])
+    config = config_from_args(args)
+    assert config.use_wandb is False
+    assert config.wandb_project == "mongoose-v3"
+    assert config.wandb_run_name is None
+
+
+def test_wandb_flag_enables_and_accepts_project_and_name():
+    parser = build_arg_parser()
+    args = parser.parse_args(
+        [
+            "--synthetic",
+            "--use-wandb",
+            "--wandb-project",
+            "mongoose-dev",
+            "--wandb-run-name",
+            "option-a-smoke",
+        ]
+    )
+    config = config_from_args(args)
+    assert config.use_wandb is True
+    assert config.wandb_project == "mongoose-dev"
+    assert config.wandb_run_name == "option-a-smoke"

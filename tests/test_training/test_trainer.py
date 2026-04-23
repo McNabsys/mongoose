@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import pickle
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -279,3 +281,111 @@ def test_init_from_ignored_when_checkpoint_dir_has_checkpoints(tmp_path):
     assert trainer_b.start_epoch == 1, (
         "Resume from checkpoint_dir must win over init_from"
     )
+
+
+class _FakeWandb:
+    """Minimal stand-in for the wandb module: records init/log/finish calls."""
+
+    def __init__(self) -> None:
+        self.init_kwargs: dict | None = None
+        self.log_calls: list[tuple[dict, int | None]] = []
+        self.finished = False
+
+    def init(self, **kwargs):  # noqa: D401 - matches wandb.init signature
+        self.init_kwargs = kwargs
+        run = types.SimpleNamespace(name=kwargs.get("name") or "fake-run")
+        return run
+
+    def log(self, payload, step=None):
+        self.log_calls.append((dict(payload), step))
+
+    def finish(self):
+        self.finished = True
+
+
+def _force_cpu(monkeypatch) -> None:
+    """Force Trainer onto CPU. Avoids GPU contention and works when CUDA is
+    partially hidden (is_available=True, device_count=0)."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+
+def test_trainer_skips_wandb_when_disabled(monkeypatch, tmp_path):
+    """Default use_wandb=False must not touch wandb."""
+    _force_cpu(monkeypatch)
+    fake = _FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    config = TrainConfig(
+        use_synthetic=True,
+        synthetic_num_molecules=8,
+        epochs=1,
+        batch_size=4,
+        use_amp=False,
+        checkpoint_dir=tmp_path / "ckpts",
+        save_every=1,
+    )
+    trainer = Trainer(config)
+    trainer.fit()
+    assert trainer._wandb is None
+    assert fake.init_kwargs is None
+    assert fake.log_calls == []
+    assert fake.finished is False
+
+
+def test_trainer_wandb_init_log_finish(monkeypatch, tmp_path):
+    """With use_wandb=True, init/log-per-epoch/finish are all called."""
+    _force_cpu(monkeypatch)
+    fake = _FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    config = TrainConfig(
+        use_synthetic=True,
+        synthetic_num_molecules=8,
+        epochs=2,
+        batch_size=4,
+        use_amp=False,
+        checkpoint_dir=tmp_path / "ckpts",
+        save_every=1,
+        use_wandb=True,
+        wandb_project="mongoose-test",
+        wandb_run_name="unit-test-run",
+    )
+    trainer = Trainer(config)
+    assert trainer._wandb is fake
+    assert fake.init_kwargs is not None
+    assert fake.init_kwargs["project"] == "mongoose-test"
+    assert fake.init_kwargs["name"] == "unit-test-run"
+    cfg = fake.init_kwargs["config"]
+    # Hyperparameters flattened from TrainConfig plus git + device metadata.
+    assert cfg["epochs"] == 2
+    assert cfg["batch_size"] == 4
+    assert "git_commit" in cfg
+    assert "device" in cfg
+
+    trainer.fit()
+    # One log call per epoch, step set to epoch index.
+    assert len(fake.log_calls) == 2
+    for epoch, (payload, step) in enumerate(fake.log_calls):
+        assert step == epoch
+        assert "train_loss" in payload
+        assert "val_loss" in payload
+        assert "lr" in payload
+        assert "blend" in payload
+    assert fake.finished is True
+
+
+def test_trainer_wandb_graceful_when_import_fails(monkeypatch, tmp_path):
+    """If wandb isn't installed, training continues without crashing."""
+    _force_cpu(monkeypatch)
+    monkeypatch.setitem(sys.modules, "wandb", None)  # makes `import wandb` raise
+    config = TrainConfig(
+        use_synthetic=True,
+        synthetic_num_molecules=8,
+        epochs=1,
+        batch_size=4,
+        use_amp=False,
+        checkpoint_dir=tmp_path / "ckpts",
+        save_every=1,
+        use_wandb=True,
+    )
+    trainer = Trainer(config)
+    assert trainer._wandb is None
+    trainer.fit()  # must not raise

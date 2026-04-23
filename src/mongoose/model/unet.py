@@ -82,8 +82,26 @@ class T2DUNet(nn.Module):
     NUM_LEVELS = 5
     PAD_MULTIPLE = 32  # 2**NUM_LEVELS
 
-    def __init__(self, in_channels: int = 1, conditioning_dim: int = 6) -> None:
+    def __init__(
+        self,
+        in_channels: int = 1,
+        conditioning_dim: int = 6,
+        probe_aware_velocity: bool = False,
+    ) -> None:
+        """Construct the U-Net.
+
+        Args:
+            in_channels: Input waveform channels (always 1 for current data).
+            conditioning_dim: Per-molecule conditioning vector size.
+            probe_aware_velocity: If True, feed the (sigmoided, detached) probe
+                heatmap as an additional input channel into the velocity head.
+                Lets the velocity head learn probe-state-conditioned corrections
+                (e.g. "slow down inside a probe event"). Architecture-level
+                opt-in — old V1 / spike checkpoints were trained without it
+                and won't load when this is True.
+        """
         super().__init__()
+        self.probe_aware_velocity = bool(probe_aware_velocity)
 
         # --- FiLM conditioning (level 0 and bottleneck) ---
         self.film = FiLMConditioning(
@@ -168,11 +186,26 @@ class T2DUNet(nn.Module):
         nn.init.constant_(final_conv.bias, -3.0)
 
         # --- Velocity head (wide kernels for smoothing) ---
-        self.velocity_head = nn.Sequential(
-            ResBlock(final_ch, 31),
-            ResBlock(final_ch, 31),
-            nn.Conv1d(final_ch, 1, 1),
-        )
+        # When ``probe_aware_velocity`` is set, prepend a 1x1 Conv that
+        # accepts the backbone features PLUS one extra channel carrying
+        # the (sigmoided, detached) probe heatmap. This gives the velocity
+        # head explicit "we're inside a probe right now" context, which the
+        # raw backbone features only encode implicitly. Detaching the probe
+        # input means probe-head training stays driven solely by L_probe;
+        # the velocity head consumes probe state as a fixed feature.
+        if self.probe_aware_velocity:
+            self.velocity_head = nn.Sequential(
+                nn.Conv1d(final_ch + 1, final_ch, 1),
+                ResBlock(final_ch, 31),
+                ResBlock(final_ch, 31),
+                nn.Conv1d(final_ch, 1, 1),
+            )
+        else:
+            self.velocity_head = nn.Sequential(
+                ResBlock(final_ch, 31),
+                ResBlock(final_ch, 31),
+                nn.Conv1d(final_ch, 1, 1),
+            )
         # (Velocity activation is applied inline in forward() — see the
         # t2d_params branch for hybrid vs softplus handling.)
 
@@ -252,7 +285,16 @@ class T2DUNet(nn.Module):
         probe = torch.sigmoid(probe_logits)  # [B, T_padded], probabilities
 
         # --- Velocity head ---
-        vel_logits = self.velocity_head(h).squeeze(1)  # [B, T_padded], raw logits
+        # When probe-aware, concatenate the (detached) probe heatmap as an
+        # extra input channel. Detach because we don't want vel-head gradient
+        # backprop'ing through probe_head — probe-head training stays driven
+        # solely by L_probe; the velocity head consumes probe state as a
+        # fixed feature rather than influencing it.
+        if self.probe_aware_velocity:
+            vel_input = torch.cat([h, probe.detach().unsqueeze(1)], dim=1)
+        else:
+            vel_input = h
+        vel_logits = self.velocity_head(vel_input).squeeze(1)  # [B, T_padded], raw logits
 
         if t2d_params is None:
             # Standard path (V1 / L_511 spike): softplus → positive velocity.
