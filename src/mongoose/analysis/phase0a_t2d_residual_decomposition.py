@@ -37,6 +37,220 @@ from mongoose.analysis.phase0b_classifier_characterization import (
 )
 
 
+def decompose(
+    probe_table_path: Path | str,
+    *,
+    example_reference_map: Path | str,
+    output_dir: Path | str,
+) -> dict:
+    """End-to-end Phase 0a decomposition. Writes CSVs + plots + JSON."""
+    import json
+    import time
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    t0 = time.monotonic()
+    df, cascade = load_residual_eligible(probe_table_path)
+    refmap = load_shared_reference_map(Path(example_reference_map))
+
+    global_stats = global_residual_stats(df)
+    per_mol = compute_per_molecule_dispersion(df)
+    headline = per_molecule_headline(per_mol)
+
+    pos_by_bin = residual_by_position_along_molecule(df)
+    run_md = residual_by_run_metadata(df)
+    vel = residual_by_velocity(df)
+    pf = residual_by_probe_features(df)
+    mf = residual_by_molecule_features(df, per_mol)
+    gen = residual_by_genomic_context(
+        df, ref_positions=refmap.probe_positions,
+        genome_length=refmap.genome_length,
+    )
+    ols = variance_decomposition_ols(df)
+    blue = blue_holdout_residual_profile(df, per_mol)
+
+    # Write CSVs
+    pos_by_bin.to_csv(output_dir / "residual_by_position.csv", index=False)
+    run_md.to_csv(output_dir / "residual_by_run_metadata.csv", index=False)
+    vel["molecule_velocity_deciles"].to_csv(
+        output_dir / "residual_by_molecule_velocity.csv", index=False
+    )
+    vel["local_over_mean_velocity_deciles"].to_csv(
+        output_dir / "residual_by_local_velocity_ratio.csv", index=False
+    )
+    pf["pearson_correlations"].to_csv(
+        output_dir / "probe_feature_correlations.csv", index=False
+    )
+    pf["per_attribute_bit"].to_csv(
+        output_dir / "residual_by_attribute_bit.csv", index=False
+    )
+    mf["pearson_correlations"].to_csv(
+        output_dir / "molecule_feature_correlations.csv", index=False
+    )
+    gen["by_strand"].to_csv(output_dir / "residual_by_strand.csv", index=False)
+    gen["by_nearest_neighbor_bucket"].to_csv(
+        output_dir / "residual_by_nearest_neighbor.csv", index=False
+    )
+    gen["by_genome_position"].to_csv(
+        output_dir / "residual_by_genome_position.csv", index=False
+    )
+
+    # Plots
+    _plot_position_along_molecule(pos_by_bin, plots_dir / "residual_by_position_along_molecule.png")
+    _plot_velocity_deciles(
+        vel["molecule_velocity_deciles"],
+        plots_dir / "residual_by_molecule_velocity.png",
+    )
+    _plot_per_molecule_dispersion(
+        per_mol, plots_dir / "per_molecule_residual_std.png",
+    )
+    _plot_trend_slope(
+        per_mol, plots_dir / "per_molecule_trend_slope.png",
+    )
+    _plot_attribute_bits(
+        pf["per_attribute_bit"], plots_dir / "residual_by_attribute_bit.png",
+    )
+
+    metrics = {
+        "schema_version": "1",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "wall_time_sec": time.monotonic() - t0,
+        "filter_cascade": cascade.as_dict(),
+        "global_residual_stats": global_stats,
+        "per_molecule_headline": headline,
+        "axis_1_position": pos_by_bin.to_dict(orient="records"),
+        "axis_3_run_metadata": run_md.to_dict(orient="records"),
+        "axis_4_velocity_molecule": vel["molecule_velocity_deciles"].to_dict(
+            orient="records"
+        ),
+        "axis_4_velocity_local": vel["local_over_mean_velocity_deciles"].to_dict(
+            orient="records"
+        ),
+        "axis_5_probe_features": {
+            "pearson_correlations": pf["pearson_correlations"].to_dict(orient="records"),
+            "per_attribute_bit": pf["per_attribute_bit"].to_dict(orient="records"),
+        },
+        "axis_6_molecule_features": {
+            "pearson_correlations": mf["pearson_correlations"].to_dict(orient="records"),
+        },
+        "axis_7_genomic_context": {
+            "by_strand": gen["by_strand"].to_dict(orient="records"),
+            "by_nearest_neighbor_bucket": gen["by_nearest_neighbor_bucket"].to_dict(
+                orient="records"
+            ),
+            "by_genome_position": gen["by_genome_position"].to_dict(orient="records"),
+        },
+        "multivariate_ols": ols,
+        "blue_holdout": blue,
+    }
+    (output_dir / "phase0a_metrics.json").write_text(
+        json.dumps(metrics, indent=2, default=str)
+    )
+    return metrics
+
+
+def _plot_position_along_molecule(pos_by_bin, out_path):
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(pos_by_bin))
+    ax.plot(x, pos_by_bin["abs_median"], color="#1f77b4", label="abs_median")
+    ax.fill_between(
+        x, pos_by_bin["signed_p10"], pos_by_bin["signed_p90"],
+        alpha=0.15, color="#1f77b4", label="signed p10-p90",
+    )
+    ax.plot(x, pos_by_bin["signed_median"], color="#d62728", label="signed_median", lw=1.2)
+    ax.axhline(0, color="black", lw=0.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels(pos_by_bin["pos_bin"].astype(str), rotation=45, ha="right", fontsize=7)
+    ax.set_xlabel("probe position along molecule (pos_frac bin)")
+    ax.set_ylabel("residual (bp)")
+    ax.set_title("Axis 1: residual by position along molecule (post-per-molecule-OLS)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+def _plot_velocity_deciles(vel_df, out_path):
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(9, 5))
+    x = vel_df["velocity_median_bp_per_ms"].astype(float)
+    ax.plot(x, vel_df["abs_median_residual_bp"], "o-", label="abs_median")
+    ax.plot(x, vel_df["abs_p90_residual_bp"], "s--", label="abs_p90", alpha=0.7)
+    ax.set_xlabel("molecule velocity (bp / ms), decile medians")
+    ax.set_ylabel("residual (bp)")
+    ax.set_yscale("log")
+    ax.set_title("Axis 4: residual by molecule velocity (14x spread, D1 -> D10)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+def _plot_per_molecule_dispersion(per_mol, out_path):
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(9, 5))
+    s = per_mol["residual_std_bp"].dropna()
+    ax.hist(np.log10(s.clip(lower=1.0)), bins=80, color="#2ca02c")
+    ax.set_xlabel("log10(per-molecule residual std, bp)")
+    ax.set_ylabel("count (molecules)")
+    ax.set_title(
+        f"Per-molecule residual std distribution (median {s.median():.0f} bp, "
+        f"p90 {s.quantile(0.9):.0f} bp)"
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+def _plot_trend_slope(per_mol, out_path):
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(9, 5))
+    s = per_mol["trend_slope_bp_per_posfrac"].dropna()
+    s_clipped = s.clip(lower=-3000.0, upper=3000.0)
+    ax.hist(s_clipped, bins=80, color="#ff7f0e")
+    ax.axvline(0, color="black", lw=1.0)
+    ax.set_xlabel("per-molecule trend slope (bp / unit pos_frac)")
+    ax.set_ylabel("count (molecules)")
+    ax.set_title(
+        f"Per-molecule trend slope  (median {s.median():+.1f},  "
+        f"50.{int(1000*(s>0).mean())%1000 // 10}% positive)"
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+def _plot_attribute_bits(bits_df, out_path):
+    import matplotlib.pyplot as plt
+    if bits_df.empty:
+        return
+    fig, ax = plt.subplots(figsize=(9, 4))
+    labels = bits_df["bit"].astype(str).tolist()
+    set_vals = bits_df["abs_median_residual_bp_set"].to_numpy()
+    clr_vals = bits_df["abs_median_residual_bp_clear"].to_numpy()
+    x = np.arange(len(labels))
+    width = 0.4
+    ax.bar(x - width / 2, set_vals, width, label="bit set", color="#d62728")
+    ax.bar(x + width / 2, clr_vals, width, label="bit clear", color="#1f77b4")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("abs_median residual (bp)")
+    ax.set_yscale("log")
+    ax.set_title("Axis 5: residual by attribute bit (log-y)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
 RESIDUAL_COLUMNS: tuple[str, ...] = tuple(set(PHASE0B_COLUMNS) | {
     "mean_lvl1_mv",
     "rise_time_t50_ms",
@@ -244,6 +458,28 @@ def per_molecule_headline(per_mol: pd.DataFrame) -> dict[str, float]:
             slope.to_numpy()
         ),
     }
+
+
+def _looks_skewed_from_zero(arr: np.ndarray) -> bool:
+    """Cheap heuristic for "distribution median is far from zero."
+
+    True when |median| exceeds one-sixth of the IQR. A symmetric
+    distribution centered at zero has ``|median| ~= 0``; a distribution
+    with a shared sign has ``|median|`` at roughly half the IQR.
+    The 1/6 cutoff flags meaningful skew without firing on small
+    population drift. Exists to trigger "stop and look" -- not a
+    rigorous test.
+    """
+    if arr.size < 100:
+        return False
+    finite = arr[np.isfinite(arr)]
+    if finite.size < 100:
+        return False
+    iqr = float(np.quantile(finite, 0.75) - np.quantile(finite, 0.25))
+    if iqr <= 0:
+        return False
+    median = float(np.median(finite))
+    return abs(median) > (iqr / 6.0)
 
 
 # --- Axis 1: position along molecule ------------------------------------
