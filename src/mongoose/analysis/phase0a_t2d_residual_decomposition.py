@@ -529,6 +529,207 @@ def residual_by_molecule_features(
     return out
 
 
+# --- Multivariate OLS: variance decomposition ----------------------------
+#
+# Small, interpretable OLS predicting |residual| from the strongest
+# univariate signals. The point is NOT to build a predictor; it is to
+# quantify what fraction of T2D error is attributable to structure we
+# already identified. The residual of THIS model is the noise floor
+# after all known structure has been accounted for.
+
+
+OLS_FEATURES: tuple[str, ...] = (
+    "pos_frac",              # position along molecule
+    "head_indicator",        # 1 if pos_frac < 0.10  (head-dive)
+    "tail_indicator",        # 1 if pos_frac > 0.90
+    "log_mol_vel",           # log(molecule_velocity_bp_per_ms)
+    "log_num_probes",        # log(num_probes)
+    "log_duration_ms",       # log(duration_ms)
+    "attr_folded_start",     # 1 if bit set
+    "attr_in_structure",     # 1 if bit set
+    "log_probe_local_density",
+)
+
+
+def variance_decomposition_ols(
+    df: pd.DataFrame,
+    *,
+    winsor_p: float = 0.99,
+) -> dict:
+    """OLS on |residual_bp| vs OLS_FEATURES. Winsorizes target at p99."""
+    y_raw = df["abs_residual_bp"].astype(np.float64).to_numpy()
+    w = float(np.quantile(y_raw, winsor_p))
+    y = np.minimum(y_raw, w)
+
+    feats = pd.DataFrame(index=df.index)
+    feats["pos_frac"] = df["pos_frac"].astype(np.float64).to_numpy()
+    feats["head_indicator"] = (feats["pos_frac"] < 0.10).astype(np.float64)
+    feats["tail_indicator"] = (feats["pos_frac"] > 0.90).astype(np.float64)
+    feats["log_mol_vel"] = np.log(
+        df["molecule_velocity_bp_per_ms"].astype(np.float64).clip(lower=1e-3).to_numpy()
+    )
+    feats["log_num_probes"] = np.log(df["num_probes"].astype(np.float64).clip(lower=1.0).to_numpy())
+    feats["log_duration_ms"] = np.log(df["duration_ms"].astype(np.float64).clip(lower=1e-3).to_numpy())
+    feats["attr_folded_start"] = df["attr_folded_start"].astype(bool).astype(np.float64).to_numpy()
+    feats["attr_in_structure"] = df["attr_in_structure"].astype(bool).astype(np.float64).to_numpy()
+    feats["log_probe_local_density"] = np.log(
+        df["probe_local_density"].astype(np.float64).clip(lower=1.0).to_numpy()
+    )
+
+    # Drop rows where any feature or target is non-finite.
+    X = feats.to_numpy(dtype=np.float64)
+    row_ok = np.all(np.isfinite(X), axis=1) & np.isfinite(y)
+    X = X[row_ok]
+    y_sub = y[row_ok]
+    # Design matrix with intercept column.
+    Xd = np.hstack([np.ones((X.shape[0], 1), dtype=np.float64), X])
+    # Solve normal equations. Pinv for numerical stability on multicollinear
+    # predictors (head_indicator / tail_indicator are near-orthogonal to
+    # pos_frac but not identical; including both is informative).
+    beta, residuals, rank, sv = np.linalg.lstsq(Xd, y_sub, rcond=None)
+    y_pred = Xd @ beta
+    ss_res = float(np.sum((y_sub - y_pred) ** 2))
+    ss_tot = float(np.sum((y_sub - y_sub.mean()) ** 2))
+    r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    residual_std = float(np.std(y_sub - y_pred))
+
+    feature_names = ["intercept"] + list(feats.columns)
+    coefs = [
+        {"feature": n, "coefficient_bp": float(b)}
+        for n, b in zip(feature_names, beta)
+    ]
+    return {
+        "n_fit": int(X.shape[0]),
+        "winsor_threshold_bp": w,
+        "r_squared": r_squared,
+        "target_mean_bp": float(y_sub.mean()),
+        "target_std_bp": float(y_sub.std()),
+        "ols_residual_std_bp": residual_std,
+        "structured_variance_fraction": r_squared,
+        "unstructured_variance_fraction": 1.0 - r_squared,
+        "coefficients": coefs,
+    }
+
+
+# --- Blue-holdout deep dive ----------------------------------------------
+
+
+BLUE_HOLDOUT_RUN_ID: str = "STB03-065H-02L58270w05-433H09j"
+
+
+def blue_holdout_residual_profile(
+    df: pd.DataFrame, per_mol: pd.DataFrame,
+) -> dict:
+    """Spec §145-158: Blue-holdout comparison vs peers + velocity-variation
+    hypothesis test."""
+    def _summary(sub: pd.DataFrame, label: str) -> dict:
+        signed = sub["residual_bp"].astype(np.float64)
+        absval = sub["abs_residual_bp"].astype(np.float64)
+        return {
+            "label": label,
+            "n_probes": int(len(sub)),
+            "n_molecules": int(sub["molecule_uid"].nunique()),
+            "signed_median_bp": float(signed.median()),
+            "abs_median_bp": float(absval.median()),
+            "abs_p90_bp": float(absval.quantile(0.9)),
+            "frac_gt_250_bp": float((absval > 250).mean()),
+        }
+
+    blue_df = df[df["run_id"] == BLUE_HOLDOUT_RUN_ID]
+    if len(blue_df) == 0:
+        return {"error": f"{BLUE_HOLDOUT_RUN_ID} not found"}
+    low_dil = df[df["concentration_group"] == "low_dil"]
+    low_dil_other = low_dil[low_dil["run_id"] != BLUE_HOLDOUT_RUN_ID]
+    low_dil_flagged = low_dil[low_dil["biochem_flagged_good"].astype(bool)]
+
+    summaries = [
+        _summary(blue_df, "blue_holdout"),
+        _summary(low_dil_other, "other_low_dil"),
+        _summary(low_dil_flagged, "low_dil_flagged"),
+        _summary(df, "global"),
+    ]
+
+    # Per-molecule local-velocity variance (hypothesis: Blue has higher
+    # within-molecule velocity variation that Option A could exploit).
+    df_sorted = df.sort_values(["run_id", "molecule_uid", "probe_idx_in_molecule"]).copy()
+    ref = df_sorted["ref_genomic_pos_bp"].astype(np.float64).to_numpy()
+    center = df_sorted["center_ms"].astype(np.float64).to_numpy()
+    bp_diff = np.abs(np.concatenate([[np.nan], np.diff(ref)]))
+    ms_diff = np.abs(np.concatenate([[np.nan], np.diff(center)]))
+    first_mask = df_sorted.groupby(
+        ["run_id", "molecule_uid"], sort=False
+    ).cumcount() == 0
+    bp_diff[first_mask.to_numpy()] = np.nan
+    ms_diff[first_mask.to_numpy()] = np.nan
+    with np.errstate(divide="ignore", invalid="ignore"):
+        local_vel = np.where(ms_diff > 0, bp_diff / ms_diff, np.nan)
+    df_sorted["local_velocity_bp_per_ms"] = local_vel
+    # Per-molecule std of local velocity / per-molecule mean velocity
+    # (coefficient of variation, cv). Higher CV = more within-molecule
+    # velocity wobble.
+    mv_stats = df_sorted.groupby(
+        ["run_id", "molecule_uid"], sort=False
+    )["local_velocity_bp_per_ms"].agg(["mean", "std"]).rename(
+        columns={"mean": "local_vel_mean", "std": "local_vel_std"}
+    )
+    mv_stats["local_vel_cv"] = mv_stats["local_vel_std"] / mv_stats["local_vel_mean"]
+    mv_stats = mv_stats.reset_index()
+
+    def _cv_summary(subset_uids: pd.Index, label: str) -> dict:
+        sub_cv = mv_stats.set_index(["run_id", "molecule_uid"]).reindex(subset_uids)[
+            "local_vel_cv"
+        ]
+        sub_cv = sub_cv.dropna()
+        return {
+            "label": label,
+            "n_molecules_with_cv": int(len(sub_cv)),
+            "local_vel_cv_median": float(sub_cv.median()) if len(sub_cv) else float("nan"),
+            "local_vel_cv_p90": float(sub_cv.quantile(0.9)) if len(sub_cv) else float("nan"),
+        }
+
+    blue_uids = blue_df.set_index(["run_id", "molecule_uid"]).index.unique()
+    low_dil_other_uids = low_dil_other.set_index(
+        ["run_id", "molecule_uid"]
+    ).index.unique()
+    low_dil_flagged_uids = low_dil_flagged.set_index(
+        ["run_id", "molecule_uid"]
+    ).index.unique()
+    global_uids = df.set_index(["run_id", "molecule_uid"]).index.unique()
+
+    cv_compare = [
+        _cv_summary(blue_uids, "blue_holdout"),
+        _cv_summary(low_dil_other_uids, "other_low_dil"),
+        _cv_summary(low_dil_flagged_uids, "low_dil_flagged"),
+        _cv_summary(global_uids, "global"),
+    ]
+
+    # Per-molecule residual std distribution on Blue vs peers
+    blue_per_mol = per_mol[per_mol["run_id"] == BLUE_HOLDOUT_RUN_ID]
+    low_dil_other_ids = set(low_dil_other["run_id"].unique())
+    low_dil_other_pm = per_mol[per_mol["run_id"].isin(low_dil_other_ids)]
+
+    std_compare = [
+        {
+            "label": "blue_holdout",
+            "n": int(len(blue_per_mol)),
+            "residual_std_median_bp": float(blue_per_mol["residual_std_bp"].median()),
+            "residual_std_p90_bp": float(blue_per_mol["residual_std_bp"].quantile(0.9)),
+        },
+        {
+            "label": "other_low_dil",
+            "n": int(len(low_dil_other_pm)),
+            "residual_std_median_bp": float(low_dil_other_pm["residual_std_bp"].median()),
+            "residual_std_p90_bp": float(low_dil_other_pm["residual_std_bp"].quantile(0.9)),
+        },
+    ]
+
+    return {
+        "residual_summary": summaries,
+        "local_velocity_cv_compare": cv_compare,
+        "per_molecule_std_compare": std_compare,
+    }
+
+
 # --- Axis 7 (spec axis 6): genomic context -------------------------------
 
 
