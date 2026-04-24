@@ -77,6 +77,7 @@ ANALYSIS_COLUMNS: tuple[str, ...] = (
     "molecule_direction",
     "molecule_align_score",
     "molecule_velocity_bp_per_ms",
+    "mean_lvl1_mv",
     # Labels
     "ref_idx",
     "ref_genomic_pos_bp",
@@ -381,6 +382,287 @@ def compute_null_rates(
             float(tol),
         )
     return out
+
+
+# --- Agreement between assigns oracle and proximity signal ---------------
+
+
+def compute_agreement_matrix(
+    df: pd.DataFrame,
+    *,
+    tolerance_bp: int,
+) -> dict[str, dict]:
+    """is_assigned (assigns oracle) vs t2d_plausible_match_{tol} (proximity).
+
+    Spec §refinement-2: this is the calibration pass that frames every
+    proximity-oracle claim downstream. We compute the matrix on three
+    subsets, each informative for a different reason:
+
+    - ``narrow_accept``: the spec's requested subset. Includes
+      narrow-ACCEPT probes on aligned molecules regardless of whether
+      the aligner offered them (the 6.1M "broad-REJECT tail" cases have
+      ``is_assigned=False`` by construction, which biases the matrix
+      toward the "proximity TRUE + assigns FALSE" cell).
+    - ``broad_accept``: restricted to probes the aligner actually had a
+      chance to place (``ref_idx.notna()``). This is the clean
+      agreement signal, since both labels are meaningfully defined.
+    - ``narrow_accept_minus_broad``: the tail cases only. Tells us what
+      fraction of "offered by SP but dropped before assignment" probes
+      look plausible by proximity -- an upper bound on FN cost of
+      whatever downstream filter dropped them.
+
+    Returns a dict keyed by subset name, with cells ``tt, tf, ft, ff``
+    (is_assigned × t2d_plausible_match, T=assigned first, T=plausible
+    second), plus derived metrics ``agreement_rate``, ``cohen_kappa``,
+    ``mcc``, ``n``.
+    """
+    col = f"t2d_plausible_match_{tolerance_bp}"
+    if col not in df.columns:
+        raise KeyError(
+            f"{col} not in df; call compute_t2d_plausible_match first."
+        )
+
+    narrow = df["attr_accepted"].astype(bool)
+    broad = df["ref_idx"].notna()
+    subsets = {
+        "narrow_accept": narrow,
+        "broad_accept": narrow & broad,
+        "narrow_accept_minus_broad": narrow & ~broad,
+    }
+
+    results: dict[str, dict] = {}
+    for name, mask in subsets.items():
+        sub = df.loc[mask, ["is_assigned", col]].copy()
+        sub = sub[sub[col].notna()]  # drop rows with no fit
+        y_assigned = sub["is_assigned"].astype(bool).to_numpy()
+        y_plausible = sub[col].astype("boolean").astype(bool).to_numpy()
+        tt = int(np.sum(y_assigned & y_plausible))
+        tf = int(np.sum(y_assigned & ~y_plausible))
+        ft = int(np.sum(~y_assigned & y_plausible))
+        ff = int(np.sum(~y_assigned & ~y_plausible))
+        total = tt + tf + ft + ff
+        results[name] = {
+            "tt": tt, "tf": tf, "ft": ft, "ff": ff, "n": total,
+            "agreement_rate": (tt + ff) / total if total else float("nan"),
+            "cohen_kappa": _cohen_kappa(tt, tf, ft, ff),
+            "mcc": _mcc(tt, tf, ft, ff),
+        }
+    return results
+
+
+def _cohen_kappa(tt: int, tf: int, ft: int, ff: int) -> float:
+    n = tt + tf + ft + ff
+    if n == 0:
+        return float("nan")
+    p_o = (tt + ff) / n
+    p_yes_assigned = (tt + tf) / n
+    p_yes_plausible = (tt + ft) / n
+    p_e = p_yes_assigned * p_yes_plausible + (1 - p_yes_assigned) * (1 - p_yes_plausible)
+    if p_e >= 1.0:
+        return float("nan")
+    return (p_o - p_e) / (1.0 - p_e)
+
+
+def _mcc(tt: int, tf: int, ft: int, ff: int) -> float:
+    # Matthews correlation coefficient; is_assigned=T treated as +.
+    # Cast to float before sqrt -- Python ints can overflow numpy ufuncs
+    # at the scales we hit (35M rows -> denom_sq up to ~1e30).
+    num = float(tt) * float(ff) - float(tf) * float(ft)
+    denom_sq = (
+        float(tt + tf) * float(tt + ft) * float(ff + tf) * float(ff + ft)
+    )
+    if denom_sq <= 0.0:
+        return float("nan")
+    return num / float(np.sqrt(denom_sq))
+
+
+# --- Feature-space envelope (Mahalanobis against known-good) -------------
+#
+# Rationale (see design notes 2026-04-23 following the T2D-proximity
+# structural failure):
+#
+# The assigns-based oracle is tautological for narrow-REJECT probes
+# (is_assigned = True implies attr_accepted = True). A T2D-proximity
+# secondary signal is too noisy to repair the tautology: per-probe
+# T2D error in the genomic frame has p50 = 532 bp, p90 = 5.9 kbp,
+# far wider than any usefully-tight tolerance. So we abandon
+# "would this rejected probe have been assigned" questions and instead
+# ask the weaker, cleanly answerable question: "does this rejected
+# probe look, featurewise, like probes we know are real bound tags?"
+#
+# The column name is ``inside_known_good_envelope``, not anything with
+# "false negative" in it. The report language throughout is "looks
+# featurewise similar to known bound tags" -- not "is a bound tag."
+
+ENVELOPE_FEATURES: tuple[str, ...] = (
+    "duration_scaled",    # duration_ms * molecule_velocity_bp_per_ms
+    "amplitude_scaled",   # max_amp_uv / mean_lvl1_mv  (dimensionless ratio)
+    "area_scaled",        # area_samples_uv / mean_lvl1_mv
+    "density_scaled",     # probe_local_density (float copy for dtype uniformity)
+)
+
+
+@dataclass(frozen=True)
+class EnvelopeModel:
+    """Mahalanobis envelope fit on a known-good probe set."""
+
+    features: tuple[str, ...]
+    mean: np.ndarray       # shape (n_features,)
+    covariance: np.ndarray # shape (n_features, n_features)
+    inv_covariance: np.ndarray
+    n_known_good: int
+    align_score_threshold: float
+    center_frac_lo: float
+    center_frac_hi: float
+
+    def mahalanobis(self, X: np.ndarray) -> np.ndarray:
+        """Per-row Mahalanobis distance. NaN rows return NaN."""
+        diff = X - self.mean
+        row_ok = ~np.any(np.isnan(diff), axis=1)
+        dist_sq = np.full(diff.shape[0], np.nan, dtype=np.float64)
+        if row_ok.any():
+            dist_sq[row_ok] = np.einsum(
+                "ni,ij,nj->n", diff[row_ok], self.inv_covariance, diff[row_ok]
+            )
+        return np.sqrt(np.maximum(dist_sq, 0.0))
+
+
+def add_scaled_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach the scaled-feature columns that feed the Mahalanobis envelope.
+
+    Scaling choices per the design refinements:
+    - ``duration_scaled = duration_ms * molecule_velocity_bp_per_ms``
+      -- probe width expressed in bp-equivalent; removes the first-order
+      molecule-speed effect.
+    - ``amplitude_scaled = max_amp_uv / mean_lvl1_mv`` -- relative
+      amplitude against the molecule's baseline current; dimensionless
+      (units differ between numerator and denominator, but the ratio is
+      stable within a molecule and removes the baseline drift).
+    - ``area_scaled = area_samples_uv / mean_lvl1_mv`` -- same principle.
+    - ``density_scaled = probe_local_density`` -- already local, cast to
+      float for uniform dtype in the feature matrix.
+
+    Guards against division by zero on mean_lvl1_mv with NaN propagation.
+    """
+    df = df.copy()
+    lvl1 = df["mean_lvl1_mv"].astype(np.float64)
+    lvl1 = lvl1.where(lvl1 > 0, np.nan)
+    df["duration_scaled"] = (
+        df["duration_ms"].astype(np.float64)
+        * df["molecule_velocity_bp_per_ms"].astype(np.float64)
+    )
+    df["amplitude_scaled"] = df["max_amp_uv"].astype(np.float64) / lvl1
+    df["area_scaled"] = df["area_samples_uv"].astype(np.float64) / lvl1
+    df["density_scaled"] = df["probe_local_density"].astype(np.float64)
+    return df
+
+
+def build_known_good_mask(
+    df: pd.DataFrame,
+    *,
+    align_score_pct: float = 75.0,
+    center_frac_lo: float = 0.1,
+    center_frac_hi: float = 0.9,
+    features: tuple[str, ...] = ENVELOPE_FEATURES,
+) -> tuple[pd.Series, float]:
+    """High-confidence bound-tag mask for envelope construction.
+
+    Definition: ``is_assigned=True`` AND molecule alignment score above
+    the supplied percentile (computed over the assigned population) AND
+    probe center inside ``[center_frac_lo, center_frac_hi]`` of the
+    translocation (avoid molecule ends, where T2D is most unstable and
+    folded-region artifacts concentrate). Rows with any NaN in the
+    envelope features are excluded from the known-good set.
+
+    Returns the boolean mask and the computed align-score threshold.
+    """
+    aligned = df[df["is_assigned"]]
+    align_score_threshold = float(
+        aligned["molecule_align_score"].quantile(align_score_pct / 100.0)
+    )
+    pos_frac = df["center_ms"].astype(np.float64) / df[
+        "translocation_time_ms"
+    ].astype(np.float64)
+    mask = (
+        df["is_assigned"]
+        & (df["molecule_align_score"] >= align_score_threshold)
+        & (pos_frac >= center_frac_lo)
+        & (pos_frac <= center_frac_hi)
+        & df[list(features)].notna().all(axis=1)
+    )
+    return mask, align_score_threshold
+
+
+def fit_envelope(
+    df: pd.DataFrame,
+    known_good_mask: pd.Series,
+    *,
+    features: tuple[str, ...] = ENVELOPE_FEATURES,
+    align_score_threshold: float = float("nan"),
+    center_frac_lo: float = 0.1,
+    center_frac_hi: float = 0.9,
+) -> EnvelopeModel:
+    """Fit the mean + covariance of the Mahalanobis envelope."""
+    X_good = df.loc[known_good_mask, list(features)].to_numpy(dtype=np.float64)
+    X_good = X_good[~np.any(np.isnan(X_good), axis=1)]
+    if X_good.shape[0] < len(features) + 1:
+        raise ValueError(
+            f"known-good set too small ({X_good.shape[0]}) to fit a "
+            f"covariance for {len(features)} features."
+        )
+    mu = X_good.mean(axis=0)
+    cov = np.cov(X_good, rowvar=False)
+    inv_cov = np.linalg.pinv(cov)
+    return EnvelopeModel(
+        features=tuple(features),
+        mean=mu,
+        covariance=cov,
+        inv_covariance=inv_cov,
+        n_known_good=int(X_good.shape[0]),
+        align_score_threshold=align_score_threshold,
+        center_frac_lo=center_frac_lo,
+        center_frac_hi=center_frac_hi,
+    )
+
+
+def apply_envelope(
+    df: pd.DataFrame,
+    envelope: EnvelopeModel,
+) -> pd.DataFrame:
+    """Attach ``mahal_envelope`` (float) and ``inside_known_good_envelope``
+    (bool, nullable) columns."""
+    df = df.copy()
+    X = df[list(envelope.features)].to_numpy(dtype=np.float64)
+    df["mahal_envelope"] = envelope.mahalanobis(X)
+    return df
+
+
+def tp_sanity_report(df: pd.DataFrame) -> dict:
+    """Return headline stats on the TP Mahalanobis distribution.
+
+    Spec-critical: median should be close to sqrt(chi2(k).ppf(0.5))
+    where k = len(features). If the observed distribution is far
+    heavier-tailed than chi-square, the envelope concept is broken
+    on this feature set and downstream rejection-breakdown analyses
+    must be reconsidered. The value returned here is what the report
+    cites to justify the envelope's use.
+    """
+    tp = df.loc[
+        df["attr_accepted"] & df["is_assigned"] & df["mahal_envelope"].notna(),
+        "mahal_envelope",
+    ]
+    return {
+        "n_tp": int(tp.size),
+        "median": float(tp.quantile(0.5)),
+        "p75": float(tp.quantile(0.75)),
+        "p90": float(tp.quantile(0.9)),
+        "p95": float(tp.quantile(0.95)),
+        "p99": float(tp.quantile(0.99)),
+        "mean": float(tp.mean()),
+        "frac_inside_3": float((tp <= 3.0).mean()),
+        "frac_inside_4": float((tp <= 4.0).mean()),
+        "frac_inside_5": float((tp <= 5.0).mean()),
+    }
 
 
 def _null_rates_for_tolerance(
