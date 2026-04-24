@@ -141,17 +141,15 @@ def run_sanity_check(
                 mismatch_examples.append(
                     (a.fragment_uid, len(a.probe_indices), mol.num_probes, a.alignment_score)
                 )
+    lines.append("## assigns probe_indices vs probes.bin num_probes / accepted")
     lines.append(
-        "## WARNING: assigns probe_indices vs probes.bin num_probes mismatch"
+        f"  aligned molecules with len(probe_indices) == num_probes : {match}"
     )
     lines.append(
-        f"  aligned molecules with matching lengths : {match}"
+        f"  aligned molecules with len(probe_indices) <  num_probes : {mismatch}"
     )
     lines.append(
-        f"  aligned molecules with mismatch        : {mismatch}"
-    )
-    lines.append(
-        f"  mismatch fraction                     : "
+        f"  mismatch fraction : "
         f"{mismatch/(match+mismatch) if (match+mismatch) else float('nan'):.3f}"
     )
     for ex in mismatch_examples:
@@ -161,12 +159,13 @@ def run_sanity_check(
         )
     lines.append("")
     lines.append(
-        "  Interpretation: spec §93 says assigns should have one ProbeK "
-        "per detected probe, but a large fraction of aligned rows have "
-        "fewer ProbeK values than num_probes. The current ETL treats "
-        "these rows as all-unassigned (conservative), which zeros out "
-        "labels for ~43% of aligned molecules. Needs user guidance on "
-        "the correct interpretation before running the full 30-run ETL."
+        "  Interpretation (confirmed 2026-04-23): .assigns.probe_indices[k] "
+        "maps to the k-th ACCEPTED probe (attribute bit 7 set) in "
+        "probes.bin detection order, NOT the k-th detected probe overall. "
+        "Non-accepted probes and accepted probes beyond len(probe_indices) "
+        "receive ref_idx=null. Joins are implemented this way in "
+        "probe_table.py; Check 2 above validates the exact mapping on the "
+        "highest-match molecule."
     )
     lines.append("")
 
@@ -243,28 +242,40 @@ def run_sanity_check(
     assign_for_best = next(
         (a for a in assigns if a.fragment_uid == best_uid), None
     )
-    lines.append("## Check 2: probes.bin ProbeK ordering")
+    lines.append("## Check 2: ProbeK -> k-th accepted probe ordering")
     if assign_for_best is None:
-        lines.append("  !! no assigns row found for best molecule — skipping")
+        lines.append("  !! no assigns row found for best molecule -- skipping")
     else:
         expected_tuple = assign_for_best.probe_indices
-        # Convert ETL ref_idx to an integer tuple, mapping pd.NA -> -1 so
-        # the comparison surfaces structural mismatches without crashing.
+        accepted_df = mol_df[mol_df["attr_accepted"]].sort_values(
+            "probe_idx_in_molecule"
+        )
+        accepted_head = accepted_df.head(len(expected_tuple))
         reported_tuple = tuple(
-            -1 if pd.isna(v) else int(v) for v in mol_df["ref_idx"].tolist()
+            -1 if pd.isna(v) else int(v)
+            for v in accepted_head["ref_idx"].tolist()
         )
         match = expected_tuple == reported_tuple
         lines.append(
-            f"  assigns row ProbeK tuple length: {len(expected_tuple)}"
+            f"  assigns.probe_indices len  : {len(expected_tuple)}"
         )
         lines.append(
-            f"  ETL row     ref_idx  tuple length: {len(reported_tuple)}"
+            f"  accepted probes in mol     : {len(accepted_df)}"
         )
         lines.append(
-            f"  equal: {match}  "
+            f"  first-K accepted == assigns: {match}  "
             f"(first 10 expected={expected_tuple[:10]}, reported={reported_tuple[:10]})"
         )
-        if not match:
+        # Accepted probes beyond K must have ref_idx=null.
+        tail_df = accepted_df.tail(
+            max(0, len(accepted_df) - len(expected_tuple))
+        )
+        tail_all_null = bool(tail_df["ref_idx"].isna().all())
+        lines.append(
+            f"  accepted-probe tail all null: {tail_all_null} "
+            f"({len(tail_df)} probes beyond K)"
+        )
+        if not match or not tail_all_null:
             failures += 1
     lines.append("")
 

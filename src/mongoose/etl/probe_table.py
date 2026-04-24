@@ -172,42 +172,55 @@ def _extend_rows_for_molecule(
 
     centers_ms = np.array([p.center_ms for p in mol.probes], dtype=np.float64)
 
-    # probes.bin probe ordering is the canonical index for .assigns ProbeK,
-    # but spec §275 asks us to verify that ordering matches via the sanity
-    # check. We preserve the probes.bin list order as probe_idx_in_molecule.
+    # probes.bin records every detected probe (all attribute bits preserved),
+    # but the Nabsys aligner only consumes *accepted* probes (attribute bit
+    # 7 set). So the k-th entry in assigns.probe_indices maps to the k-th
+    # accepted probe in probes.bin detection order — not the k-th probe
+    # overall. Empirically this interpretation matches 76% of aligned
+    # molecules exactly; the remaining 24% have len(probe_indices) strictly
+    # shorter than the accepted count, consistent with an additional
+    # downstream filter (TVC / width gate) that drops a tail of accepted
+    # probes before they reach the aligner. Confirmed with Jon 2026-04-23.
     probe_indices_from_assigns: tuple[int, ...] = (
         assignment.probe_indices if assignment is not None else ()
     )
     molecule_aligned = assignment is not None and assignment.ref_index >= 0
-    # Only trust probe_indices when the molecule actually aligned AND the
-    # assigned count matches num_probes; otherwise every probe is
-    # "unassigned" (ref_idx = 0).
-    trust_assigns = (
-        molecule_aligned
-        and len(probe_indices_from_assigns) == n_probes
-    )
+
+    accepted_positions = [
+        i for i, p in enumerate(mol.probes) if (p.attribute >> 7) & 1
+    ]
 
     # --- Labels per-probe (assigned bp + strand) ---
-    per_probe_ref_idx: list[int | None] = []
-    per_probe_bp: list[int | None] = []
-    per_probe_strand: list[int | None] = []
-    for i in range(n_probes):
-        if trust_assigns:
-            ref_idx_1_based = probe_indices_from_assigns[i]
+    per_probe_ref_idx: list[int | None] = [None] * n_probes
+    per_probe_bp: list[int | None] = [None] * n_probes
+    per_probe_strand: list[int | None] = [None] * n_probes
+
+    if molecule_aligned and probe_indices_from_assigns:
+        n_assigns = len(probe_indices_from_assigns)
+        n_accepted = len(accepted_positions)
+        # Under the confirmed interpretation, n_assigns <= n_accepted.
+        # n_assigns > n_accepted would violate the rule; surface as an
+        # error rather than silently truncating.
+        if n_assigns > n_accepted:
+            raise ValueError(
+                f"molecule uid={mol.uid}: assigns has {n_assigns} ProbeK "
+                f"values but only {n_accepted} accepted probes in "
+                f"probes.bin. Join rule (k-th ProbeK -> k-th accepted "
+                f"probe) requires n_assigns <= n_accepted."
+            )
+        for k, ref_idx_1_based in enumerate(probe_indices_from_assigns):
+            probe_pos = accepted_positions[k]
             if ref_idx_1_based > 0:
                 bp, strand = refmap.lookup(ref_idx_1_based)
-                per_probe_ref_idx.append(ref_idx_1_based)
-                per_probe_bp.append(bp)
-                per_probe_strand.append(strand)
-                continue
-            # ref_idx = 0 — detected but unassigned within aligned molecule
-            per_probe_ref_idx.append(0)
-            per_probe_bp.append(None)
-            per_probe_strand.append(None)
-        else:
-            per_probe_ref_idx.append(None)
-            per_probe_bp.append(None)
-            per_probe_strand.append(None)
+                per_probe_ref_idx[probe_pos] = ref_idx_1_based
+                per_probe_bp[probe_pos] = bp
+                per_probe_strand[probe_pos] = strand
+            else:
+                # ref_idx=0 -- accepted probe, detector-found but not
+                # assigned to any reference site (real unmatched case).
+                per_probe_ref_idx[probe_pos] = 0
+        # Accepted probes beyond n_assigns and all non-accepted probes
+        # keep per_probe_ref_idx[i] = None (left unset above).
 
     # --- Derived: molecule-level ---
     molecule_bp_length = compute_molecule_bp_length(per_probe_bp)
