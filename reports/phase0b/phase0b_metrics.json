@@ -1,0 +1,239 @@
+{
+  "schema_version": "1",
+  "generated_at": "2026-04-23T22:15:01-0400",
+  "wall_time_sec": 152.76600000000326,
+  "filter_cascade": {
+    "total_rows": 56531725,
+    "after_molecule_aligned": 35675076,
+    "after_not_do_not_use": 35675076,
+    "after_min_probes": 35675076
+  },
+  "envelope": {
+    "n_known_good": 4168778,
+    "align_score_threshold": 500834.0,
+    "align_score_pct": 75.0,
+    "center_frac_lo": 0.1,
+    "center_frac_hi": 0.9,
+    "features": [
+      "duration_scaled",
+      "amplitude_scaled",
+      "area_scaled",
+      "density_scaled"
+    ],
+    "mean": [
+      888.6914755942377,
+      1256.4043411956393,
+      41609.955922158086,
+      10.519018762812507
+    ],
+    "envelope_threshold": 3.0
+  },
+  "tp_sanity": {
+    "n_tp": 24650774,
+    "median": 1.978451257973399,
+    "p75": 2.508780597816158,
+    "p90": 3.044596725231122,
+    "p95": 3.5101200498190734,
+    "p99": 5.682291449573427,
+    "mean": 2.1215158403496637,
+    "frac_inside_3": 0.8919813633438042,
+    "frac_inside_4": 0.9695796164453092,
+    "frac_inside_5": 0.9852729979188483
+  },
+  "confusion": {
+    "narrow": {
+      "tp": 24650774,
+      "fp": 9244245,
+      "fn": 0,
+      "tn": 1780057,
+      "n": 35675076,
+      "precision": 0.7272683340286665,
+      "recall": 1.0,
+      "specificity": 0.16146663979270523,
+      "f1": 0.8421023180948287,
+      "mcc": 0.3426799879234963,
+      "cohen_kappa": 0.21017803151556047,
+      "classifier": "attr_accepted",
+      "label": "is_assigned"
+    },
+    "broad": {
+      "tp": 24650774,
+      "fp": 3109457,
+      "fn": 0,
+      "tn": 7914845,
+      "n": 35675076,
+      "precision": 0.887988792312283,
+      "recall": 1.0,
+      "specificity": 0.717945226827059,
+      "f1": 0.9406716776371681,
+      "mcc": 0.7984530762145814,
+      "cohen_kappa": 0.7786463274342702,
+      "classifier": "broad_eligible",
+      "label": "is_assigned"
+    },
+    "delta_broad_minus_narrow": {
+      "tp": 0,
+      "fp": -6134788,
+      "fn": 0,
+      "tn": 6134788,
+      "precision": 0.16072045828361647,
+      "recall": 0.0,
+      "specificity": 0.5564785870343537,
+      "mcc": 0.4557730882910851,
+      "cohen_kappa": 0.5684682959187097,
+      "f1": 0.09856935954233936
+    }
+  },
+  "oracle_sanity": {
+    "overall": {
+      "n": 24650770,
+      "median_bp": 531.7339222896262,
+      "p75_bp": 1601.2172746463584,
+      "p90_bp": 5899.26671558251,
+      "p95_bp": 9864.494137053714,
+      "p99_bp": 19457.8739004772,
+      "frac_gt_250_bp": 0.7053719214450502,
+      "frac_gt_1000_bp": 0.3379146371492655
+    },
+    "biochem_flagged_good=False": {
+      "n": 19359245,
+      "median_bp": 526.2749130874872,
+      "p75_bp": 1580.5741387661546,
+      "p90_bp": 5848.325679383245,
+      "p95_bp": 9802.893804762165,
+      "p99_bp": 19362.923676570823,
+      "frac_gt_250_bp": 0.7029261729989986,
+      "frac_gt_1000_bp": 0.3354347754780726
+    },
+    "biochem_flagged_good=True": {
+      "n": 5291525,
+      "median_bp": 552.2490106516634,
+      "p75_bp": 1678.2730817673728,
+      "p90_bp": 6083.898440118558,
+      "p95_bp": 10093.115699730159,
+      "p99_bp": 19805.132278356283,
+      "frac_gt_250_bp": 0.7143197849391244,
+      "frac_gt_1000_bp": 0.3469873051719495
+    }
+  },
+  "blue_holdout": {
+    "blue_holdout": {
+      "n_probes": 475170,
+      "n_molecules": 26681,
+      "narrow_precision": 0.7556428427868609,
+      "narrow_recall": 1.0,
+      "narrow_mcc": 0.3191158227238202,
+      "broad_precision": 0.8758317887636352,
+      "broad_recall": 1.0,
+      "broad_mcc": 0.7372952680046448
+    },
+    "other_low_dil": {
+      "n_probes": 10755564,
+      "n_molecules": 115187,
+      "narrow_precision": 0.7621618912911386,
+      "narrow_recall": 1.0,
+      "narrow_mcc": 0.3329789083879043,
+      "broad_precision": 0.8943888106337395,
+      "broad_recall": 1.0,
+      "broad_mcc": 0.7779377218118502
+    },
+    "low_dil_flagged": {
+      "n_probes": 2113544,
+      "n_molecules": 80249,
+      "narrow_precision": 0.758791448117515,
+      "narrow_recall": 1.0,
+      "narrow_mcc": 0.3452545079026236,
+      "broad_precision": 0.9078398885094587,
+      "broad_recall": 1.0,
+      "broad_mcc": 0.8145350239296625
+    },
+    "global": {
+      "n_probes": 35675076,
+      "n_molecules": 194470,
+      "narrow_precision": 0.7272683340286665,
+      "narrow_recall": 1.0,
+      "narrow_mcc": 0.3426799879234963,
+      "broad_precision": 0.887988792312283,
+      "broad_recall": 1.0,
+      "broad_mcc": 0.7984530762145814
+    }
+  },
+  "rejection_breakdown": [
+    {
+      "bit": "attr_folded_start",
+      "n_fired_on_rejected": 14081,
+      "n_with_finite_mahal": 14081,
+      "mahal_median_rejected": 2.7209321635759003,
+      "fraction_inside_envelope": 0.7285704140330942,
+      "tp_inside_rate_reference": 0.8919813633438042,
+      "fp_inside_rate_reference": 0.6721793937741806,
+      "lift_vs_tp_reference": 0.8168000408684267
+    },
+    {
+      "bit": "attr_in_structure",
+      "n_fired_on_rejected": 990032,
+      "n_with_finite_mahal": 990032,
+      "mahal_median_rejected": 2.836999985467818,
+      "fraction_inside_envelope": 0.617744678959872,
+      "tp_inside_rate_reference": 0.8919813633438042,
+      "fp_inside_rate_reference": 0.6721793937741806,
+      "lift_vs_tp_reference": 0.6925533473525828
+    },
+    {
+      "bit": "attr_excl_width_sp",
+      "n_fired_on_rejected": 1780057,
+      "n_with_finite_mahal": 1780057,
+      "mahal_median_rejected": 2.943366937609156,
+      "fraction_inside_envelope": 0.5389074619520611,
+      "tp_inside_rate_reference": 0.8919813633438042,
+      "fp_inside_rate_reference": 0.6721793937741806,
+      "lift_vs_tp_reference": 0.6041689704500532
+    },
+    {
+      "bit": "attr_excl_amp_high",
+      "n_fired_on_rejected": 0,
+      "n_with_finite_mahal": 0,
+      "mahal_median_rejected": NaN,
+      "fraction_inside_envelope": NaN,
+      "tp_inside_rate_reference": 0.8919813633438042,
+      "fp_inside_rate_reference": 0.6721793937741806,
+      "lift_vs_tp_reference": NaN
+    },
+    {
+      "bit": "attr_excl_width_remap",
+      "n_fired_on_rejected": 0,
+      "n_with_finite_mahal": 0,
+      "mahal_median_rejected": NaN,
+      "fraction_inside_envelope": NaN,
+      "tp_inside_rate_reference": 0.8919813633438042,
+      "fp_inside_rate_reference": 0.6721793937741806,
+      "lift_vs_tp_reference": NaN
+    },
+    {
+      "bit": "attr_folded_end",
+      "n_fired_on_rejected": 0,
+      "n_with_finite_mahal": 0,
+      "mahal_median_rejected": NaN,
+      "fraction_inside_envelope": NaN,
+      "tp_inside_rate_reference": 0.8919813633438042,
+      "fp_inside_rate_reference": 0.6721793937741806,
+      "lift_vs_tp_reference": NaN
+    },
+    {
+      "bit": "attr_excl_outside_partial",
+      "n_fired_on_rejected": 0,
+      "n_with_finite_mahal": 0,
+      "mahal_median_rejected": NaN,
+      "fraction_inside_envelope": NaN,
+      "tp_inside_rate_reference": 0.8919813633438042,
+      "fp_inside_rate_reference": 0.6721793937741806,
+      "lift_vs_tp_reference": NaN
+    }
+  ],
+  "plot_paths": [
+    "reports\\phase0b\\plots\\feature_dist_duration_scaled.png",
+    "reports\\phase0b\\plots\\feature_dist_amplitude_scaled.png",
+    "reports\\phase0b\\plots\\feature_dist_area_scaled.png",
+    "reports\\phase0b\\plots\\feature_dist_density_scaled.png"
+  ]
+}

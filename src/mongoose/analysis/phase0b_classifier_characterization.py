@@ -637,6 +637,414 @@ def apply_envelope(
     return df
 
 
+# --- Confusion matrices + metrics ----------------------------------------
+
+
+def _metrics_from_cells(tp: int, fp: int, fn: int, tn: int) -> dict[str, float]:
+    n = tp + fp + fn + tn
+    precision = tp / (tp + fp) if (tp + fp) else float("nan")
+    recall = tp / (tp + fn) if (tp + fn) else float("nan")
+    specificity = tn / (tn + fp) if (tn + fp) else float("nan")
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if (precision + recall) and not np.isnan(precision + recall)
+        else float("nan")
+    )
+    return {
+        "tp": int(tp),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tn": int(tn),
+        "n": int(n),
+        "precision": precision,
+        "recall": recall,
+        "specificity": specificity,
+        "f1": f1,
+        "mcc": _mcc(tp, fp, fn, tn),
+        "cohen_kappa": _cohen_kappa(tp, fp, fn, tn),
+    }
+
+
+def compute_confusion_matrix(
+    df: pd.DataFrame,
+    classifier_col: str,
+    *,
+    label_col: str = "is_assigned",
+) -> dict:
+    """2x2 confusion against ``label_col`` (default ``is_assigned``).
+
+    Rows: classifier ACCEPT / REJECT. Columns: label True / False.
+    ``classifier_col`` must be a boolean column (True = ACCEPT).
+    """
+    y_pred = df[classifier_col].astype(bool).to_numpy()
+    y_true = df[label_col].astype(bool).to_numpy()
+    tp = int(np.sum(y_pred & y_true))
+    fp = int(np.sum(y_pred & ~y_true))
+    fn = int(np.sum(~y_pred & y_true))
+    tn = int(np.sum(~y_pred & ~y_true))
+    return _metrics_from_cells(tp, fp, fn, tn) | {
+        "classifier": classifier_col,
+        "label": label_col,
+    }
+
+
+def stratified_confusion(
+    df: pd.DataFrame,
+    stratum_col: str,
+    classifier_col: str,
+    *,
+    label_col: str = "is_assigned",
+) -> pd.DataFrame:
+    """One row per (stratum value, classifier) with precision/recall/MCC etc."""
+    rows: list[dict] = []
+    for value, sub in df.groupby(stratum_col, dropna=False, observed=True):
+        cells = compute_confusion_matrix(sub, classifier_col, label_col=label_col)
+        cells["stratum_col"] = stratum_col
+        cells["stratum_value"] = value
+        rows.append(cells)
+    return pd.DataFrame(rows).sort_values("stratum_value").reset_index(drop=True)
+
+
+# --- Rejection-bit breakdown with envelope fraction ----------------------
+
+
+REJECTION_BITS: tuple[str, ...] = (
+    "attr_excl_amp_high",
+    "attr_excl_width_sp",
+    "attr_excl_width_remap",
+    "attr_in_structure",
+    "attr_folded_start",
+    "attr_folded_end",
+    "attr_excl_outside_partial",
+)
+
+
+def rejection_envelope_breakdown(
+    df: pd.DataFrame,
+    *,
+    envelope_threshold: float = 3.0,
+) -> pd.DataFrame:
+    """Per rejection bit: counts + fraction inside the known-good envelope.
+
+    A bit that fires mostly on probes INSIDE the envelope is flagging
+    probes that look featurewise similar to known bound tags -- the
+    rejection rule is worth revisiting. A bit that fires mostly OUTSIDE
+    the envelope is doing its job.
+    """
+    if "mahal_envelope" not in df.columns:
+        raise KeyError("call apply_envelope before rejection_envelope_breakdown")
+    inside = df["mahal_envelope"] <= envelope_threshold
+    mahal_finite = df["mahal_envelope"].notna()
+
+    rejected = df[~df["attr_accepted"].astype(bool)]
+    tp_mask = df["attr_accepted"] & df["is_assigned"]
+    fp_mask = df["attr_accepted"] & ~df["is_assigned"]
+    tp_inside_rate = float(inside[tp_mask & mahal_finite].mean())
+    fp_inside_rate = float(inside[fp_mask & mahal_finite].mean())
+
+    rows: list[dict] = []
+    for bit in REJECTION_BITS:
+        bit_mask = df[bit].astype(bool)
+        fired_mask = bit_mask & ~df["attr_accepted"].astype(bool)
+        n_fired = int(fired_mask.sum())
+        sub_finite = fired_mask & mahal_finite
+        n_mahal = int(sub_finite.sum())
+        inside_frac = float(inside[sub_finite].mean()) if n_mahal else float("nan")
+        mahal_median = (
+            float(df.loc[sub_finite, "mahal_envelope"].median())
+            if n_mahal
+            else float("nan")
+        )
+        rows.append({
+            "bit": bit,
+            "n_fired_on_rejected": n_fired,
+            "n_with_finite_mahal": n_mahal,
+            "mahal_median_rejected": mahal_median,
+            "fraction_inside_envelope": inside_frac,
+            "tp_inside_rate_reference": tp_inside_rate,
+            "fp_inside_rate_reference": fp_inside_rate,
+            "lift_vs_tp_reference": (
+                (inside_frac / tp_inside_rate) if (tp_inside_rate > 0 and n_mahal) else float("nan")
+            ),
+        })
+    return pd.DataFrame(rows).sort_values("fraction_inside_envelope", ascending=False).reset_index(drop=True)
+
+
+# --- Feature distribution plots ------------------------------------------
+
+
+def feature_distribution_plots(
+    df: pd.DataFrame,
+    *,
+    features: Iterable[str] = ENVELOPE_FEATURES,
+    classifier_col: str = "attr_accepted",
+    output_dir: Path | str,
+) -> list[Path]:
+    """Overlaid histograms per feature broken down by (classifier x label)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tp_mask = df[classifier_col].astype(bool) & df["is_assigned"]
+    fp_mask = df[classifier_col].astype(bool) & ~df["is_assigned"]
+    tn_mask = ~df[classifier_col].astype(bool) & ~df["is_assigned"]
+    # fn_mask skipped -- zero by construction for the assigns oracle.
+
+    paths: list[Path] = []
+    for feat in features:
+        data = df[feat].astype(np.float64)
+        finite = np.isfinite(data)
+        lo = float(data[finite].quantile(0.001))
+        hi = float(data[finite].quantile(0.999))
+        bins = np.linspace(lo, hi, 80)
+
+        fig, ax = plt.subplots(figsize=(9, 5))
+        for mask, label, color in [
+            (tp_mask, "TP  accept+assigned", "#2ca02c"),
+            (fp_mask, "FP  accept+not_assigned", "#d62728"),
+            (tn_mask, "TN  reject+not_assigned", "#1f77b4"),
+        ]:
+            sub = data[mask & finite]
+            if len(sub) == 0:
+                continue
+            ax.hist(sub, bins=bins, histtype="step", label=label, color=color, linewidth=1.6)
+        ax.set_xlabel(feat)
+        ax.set_ylabel("count")
+        ax.set_yscale("log")
+        ax.set_title(f"{feat} by classifier x label  (log-y)")
+        ax.legend()
+        path = output_dir / f"feature_dist_{feat}.png"
+        fig.tight_layout()
+        fig.savefig(path, dpi=110)
+        plt.close(fig)
+        paths.append(path)
+    return paths
+
+
+# --- Oracle sanity: T2D residual vs interval_match_tol_bp ----------------
+
+
+def oracle_sanity_report(df: pd.DataFrame) -> dict:
+    """Distribution of |predicted_genomic_bp - ref_genomic_pos_bp|
+    for assigned probes, plus fractions beyond 250 / 1000 bp.
+
+    The spec's §155 wanted ``|t2d_predicted_bp_pos - ref_genomic_pos_bp|``
+    directly, but those are in different coordinate frames (molecule-
+    local vs genomic). We report the per-probe genomic-frame residual
+    that PHASE B computed after per-molecule affine fit -- this is
+    what the spec actually meant. Stratified by biochem_flagged_good
+    per spec §159.
+    """
+    if "predicted_genomic_bp" not in df.columns:
+        raise KeyError(
+            "oracle_sanity_report requires predicted_genomic_bp; "
+            "run predict_genomic_positions first."
+        )
+    assigned = df[df["is_assigned"] & df["predicted_genomic_bp"].notna()].copy()
+    resid = (assigned["predicted_genomic_bp"] - assigned["ref_genomic_pos_bp"]).abs()
+
+    def _stats(s: pd.Series) -> dict:
+        return {
+            "n": int(s.size),
+            "median_bp": float(s.quantile(0.5)),
+            "p75_bp": float(s.quantile(0.75)),
+            "p90_bp": float(s.quantile(0.9)),
+            "p95_bp": float(s.quantile(0.95)),
+            "p99_bp": float(s.quantile(0.99)),
+            "frac_gt_250_bp": float((s > 250).mean()),
+            "frac_gt_1000_bp": float((s > 1000).mean()),
+        }
+
+    out: dict[str, dict] = {"overall": _stats(resid)}
+    for flag_val, sub in assigned.groupby("biochem_flagged_good", dropna=False):
+        sub_resid = (sub["predicted_genomic_bp"] - sub["ref_genomic_pos_bp"]).abs()
+        out[f"biochem_flagged_good={bool(flag_val)}"] = _stats(sub_resid)
+    return out
+
+
+# --- Blue-holdout deep dive ----------------------------------------------
+
+
+BLUE_HOLDOUT_RUN_ID: str = "STB03-065H-02L58270w05-433H09j"
+
+
+def blue_holdout_deep_dive(df: pd.DataFrame) -> dict:
+    """Per-run confusion + rejection breakdown for the Blue holdout."""
+    if BLUE_HOLDOUT_RUN_ID not in set(df["run_id"]):
+        return {"error": f"{BLUE_HOLDOUT_RUN_ID} not in df"}
+    target = df[df["run_id"] == BLUE_HOLDOUT_RUN_ID]
+    low_dil = df[df["concentration_group"] == "low_dil"]
+    low_dil_flagged = low_dil[low_dil["biochem_flagged_good"]]
+
+    def _summary(sub: pd.DataFrame) -> dict:
+        narrow = compute_confusion_matrix(sub, "attr_accepted")
+        sub_b = sub.copy()
+        sub_b["broad_eligible"] = sub_b["ref_idx"].notna()
+        broad = compute_confusion_matrix(sub_b, "broad_eligible")
+        return {
+            "n_probes": len(sub),
+            "n_molecules": int(sub["molecule_uid"].nunique()),
+            "narrow_precision": narrow["precision"],
+            "narrow_recall": narrow["recall"],
+            "narrow_mcc": narrow["mcc"],
+            "broad_precision": broad["precision"],
+            "broad_recall": broad["recall"],
+            "broad_mcc": broad["mcc"],
+        }
+
+    return {
+        "blue_holdout": _summary(target),
+        "other_low_dil": _summary(low_dil[low_dil["run_id"] != BLUE_HOLDOUT_RUN_ID]),
+        "low_dil_flagged": _summary(low_dil_flagged),
+        "global": _summary(df),
+    }
+
+
+# --- Entry point ---------------------------------------------------------
+
+
+def characterize(
+    probe_table_path: Path | str,
+    *,
+    example_remap_settings: Path | str,
+    example_reference_map: Path | str,
+    output_dir: Path | str,
+    envelope_threshold: float = 3.0,
+    align_score_pct: float = 75.0,
+) -> dict:
+    """End-to-end Phase 0b characterization. Produces CSVs, plots, JSON.
+
+    Returns the headline ``metrics`` dict the report pulls from; writes
+    the following artifacts under ``output_dir``:
+
+    - ``confusion_matrices.csv``
+    - ``stratified_confusion.csv``
+    - ``rejection_breakdown.csv``
+    - ``phase0b_metrics.json``
+    - ``plots/feature_dist_{feature}.png``
+
+    The report narrative (``phase0b_report.md``) is rendered by
+    :func:`write_report` as a separate step so the raw artifacts can
+    be re-styled without recomputing.
+    """
+    import json
+    import time
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    t0 = time.monotonic()
+
+    # 1. Filter cascade + load
+    df, cascade = load_analysis_eligible(probe_table_path)
+    load_reference_settings(Path(example_remap_settings))
+    refmap = load_shared_reference_map(Path(example_reference_map))
+
+    # 2. Per-molecule affine fit -> genomic predictions (for oracle sanity)
+    fits = fit_per_molecule_affine(df)
+    df = predict_genomic_positions(df, fits)
+
+    # 3. Scaled features + envelope
+    df = add_scaled_features(df)
+    known_good, align_thr = build_known_good_mask(df, align_score_pct=align_score_pct)
+    envelope = fit_envelope(df, known_good, align_score_threshold=align_thr)
+    df = apply_envelope(df, envelope)
+    tp_sanity = tp_sanity_report(df)
+
+    # 4. Broad eligibility column (broad_eligible = probe was offered to aligner)
+    df["broad_eligible"] = df["ref_idx"].notna()
+
+    # 5. Global confusion matrices (narrow + broad)
+    narrow = compute_confusion_matrix(df, "attr_accepted")
+    broad = compute_confusion_matrix(df, "broad_eligible")
+    delta = {
+        k: (broad[k] - narrow[k]) if isinstance(narrow[k], (int, float)) else None
+        for k in ("tp", "fp", "fn", "tn", "precision", "recall",
+                 "specificity", "mcc", "cohen_kappa", "f1")
+    }
+
+    confusion_records = [
+        {**narrow, "classifier_kind": "narrow"},
+        {**broad, "classifier_kind": "broad"},
+        {**delta, "classifier": "broad_minus_narrow",
+         "label": "is_assigned", "classifier_kind": "delta"},
+    ]
+    pd.DataFrame(confusion_records).to_csv(
+        output_dir / "confusion_matrices.csv", index=False
+    )
+
+    # 6. Stratified confusion matrices
+    strata = ["concentration_group", "biochem_flagged_good", "excel_instrument"]
+    # Add SNR tercile (per-probe proxy; the Excel SNR is per-run so the
+    # terciles are run-level in effect, but per-probe SNR lets pandas
+    # handle grouping uniformly).
+    snr = df["excel_snr"].astype(np.float64)
+    if snr.notna().any():
+        df["snr_tercile"] = pd.qcut(
+            snr, q=3, labels=["SNR_low", "SNR_mid", "SNR_high"]
+        ).astype("string")
+        strata.append("snr_tercile")
+
+    strat_records: list[pd.DataFrame] = []
+    for stratum in strata:
+        for cls in ("attr_accepted", "broad_eligible"):
+            part = stratified_confusion(df, stratum, cls)
+            part["classifier"] = cls
+            strat_records.append(part)
+    stratified_df = pd.concat(strat_records, ignore_index=True)
+    stratified_df.to_csv(output_dir / "stratified_confusion.csv", index=False)
+
+    # 7. Rejection-bit envelope breakdown
+    rej_df = rejection_envelope_breakdown(df, envelope_threshold=envelope_threshold)
+    rej_df.to_csv(output_dir / "rejection_breakdown.csv", index=False)
+
+    # 8. Feature distribution plots
+    plot_paths = feature_distribution_plots(
+        df, output_dir=output_dir / "plots"
+    )
+
+    # 9. Oracle sanity (T2D genomic-frame residual on assigned probes)
+    oracle = oracle_sanity_report(df)
+
+    # 10. Blue-holdout deep dive
+    blue = blue_holdout_deep_dive(df)
+
+    # 11. Headline metrics JSON
+    metrics = {
+        "schema_version": "1",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "wall_time_sec": time.monotonic() - t0,
+        "filter_cascade": cascade.as_dict(),
+        "envelope": {
+            "n_known_good": envelope.n_known_good,
+            "align_score_threshold": align_thr,
+            "align_score_pct": align_score_pct,
+            "center_frac_lo": envelope.center_frac_lo,
+            "center_frac_hi": envelope.center_frac_hi,
+            "features": list(envelope.features),
+            "mean": envelope.mean.tolist(),
+            "envelope_threshold": envelope_threshold,
+        },
+        "tp_sanity": tp_sanity,
+        "confusion": {
+            "narrow": narrow,
+            "broad": broad,
+            "delta_broad_minus_narrow": delta,
+        },
+        "oracle_sanity": oracle,
+        "blue_holdout": blue,
+        "rejection_breakdown": rej_df.to_dict(orient="records"),
+        "plot_paths": [str(p) for p in plot_paths],
+    }
+    (output_dir / "phase0b_metrics.json").write_text(
+        json.dumps(metrics, indent=2, default=str)
+    )
+
+    return metrics
+
+
 def tp_sanity_report(df: pd.DataFrame) -> dict:
     """Return headline stats on the TP Mahalanobis distribution.
 
