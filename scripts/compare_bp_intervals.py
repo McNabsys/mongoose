@@ -63,7 +63,14 @@ def _per_cache_eval_v3(
     """Run a V3 checkpoint against a single cache; return interval metrics."""
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = ckpt["config"]
-    model = T2DUNet(config.in_channels, config.conditioning_dim).to(device)
+    # probe_aware_velocity alters the vel-head input shape, so a checkpoint
+    # trained with it cannot load into a default-arch model. Pull the flag
+    # from the saved config; fall back to False for older checkpoints.
+    model = T2DUNet(
+        config.in_channels,
+        config.conditioning_dim,
+        probe_aware_velocity=bool(getattr(config, "probe_aware_velocity", False)),
+    ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 

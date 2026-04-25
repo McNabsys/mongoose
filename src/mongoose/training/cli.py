@@ -61,6 +61,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help=(
+            "DataLoader worker-process count. Default from TrainConfig (0). "
+            "Setting >0 moves data prep off the main process so the GPU "
+            "doesn't wait on IO; try 4-8 on multi-core cloud VMs."
+        ),
+    )
     parser.add_argument("--no-amp", action="store_true", help="Disable mixed precision")
     parser.add_argument(
         "--checkpoint-dir",
@@ -277,6 +287,8 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         checkpoint_dir=Path(args.checkpoint_dir),
         save_every=args.save_every,
     )
+    if args.num_workers is not None:
+        config.num_workers = args.num_workers
     if args.warmstart_epochs is not None:
         config.warmstart_epochs = args.warmstart_epochs
     if args.warmstart_fade_epochs is not None:
