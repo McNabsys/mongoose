@@ -10,3 +10,19 @@ ssh/
 *.pem
 *.key
 
+# Training artifacts (root-level)
+*_checkpoints/
+*_train.log
+overfit_*.log
+overfit_*.png
+label_*.png
+fix_verified_*.png
+Black_*.png
+
+# Eval artifacts (regenerable from scripts/ + checkpoints)
+phase6_holdout_eval/molecule_library*/
+phase6_holdout_eval/*.png
+
+# Large derived data (regenerable from raw via build_probe_table.py)
+data/derived/probe_table.parquet
+data/derived/probe_table/
