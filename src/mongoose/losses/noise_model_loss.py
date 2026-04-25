@@ -246,6 +246,21 @@ class NoiseModelLoss(nn.Module):
                     gt_centers = peak_indices[:k].to(device=device, dtype=torch.long)
                     ref_bp = ref_bp[:k]
 
+            # Length mismatch guard: ground_truth.py builds
+            # ``warmstart_probe_centers_samples`` as a strict subset of
+            # ``reference_bp_positions`` (probes with duration_ms <= 0 are
+            # dropped from warmstart but kept in reference). The interval /
+            # position NLLs assume 1:1 pairing, so we skip molecules whose
+            # arrays differ in length until the data layer supplies an
+            # explicit ``warmstart_ref_indices`` mapping. Affected molecules
+            # still receive probe-loss supervision via the centernet path.
+            if (
+                gt_centers is not None
+                and ref_bp.numel() >= 2
+                and gt_centers.numel() != ref_bp.numel()
+            ):
+                gt_centers = None  # forces the degenerate-fallback branch
+
             if gt_centers is not None and ref_bp.numel() >= 2:
                 gt_centers = gt_centers.clamp(0, pred_h_b.shape[0] - 1)
                 pred_bp_at_peaks = pred_bp_b[gt_centers]
