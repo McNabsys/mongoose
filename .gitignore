@@ -10,14 +10,37 @@ ssh/
 *.pem
 *.key
 
+# Local Python environments
+.venv/
+
+# Raw data dirs (per-checkout, not source)
+E. coli/
+
 # Training artifacts (root-level)
 *_checkpoints/
 *_train.log
 overfit_*.log
 overfit_*.png
+*_overfit.log
+*_overfit.png
 label_*.png
 fix_verified_*.png
 Black_*.png
+
+# GPU smoke + overnight training artifacts
+gpu_smoke*.log
+gpu_smoke_tiny*/
+overnight_training*/
+cache_regen_logs/
+
+# Phase 2A run artifacts (regenerable)
+phase2a_eval*.json
+phase2a_eval*.log
+phase2a_viz*.log
+phase2a_viz*.png
+
+# Sprint decks (treat as artifacts; commit explicitly with -f if needed)
+project-mongoose-sprint-update.pptx
 
 # Eval artifacts (regenerable from scripts/ + checkpoints)
 phase6_holdout_eval/molecule_library*/
