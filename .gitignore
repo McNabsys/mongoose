@@ -4,3 +4,9 @@ checkpoints/
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Private keys -- never commit
+ssh/
+*.pem
+*.key
+
