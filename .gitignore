@@ -13,6 +13,9 @@ ssh/
 # Local Python environments
 .venv/
 
+# Claude Code agent state (worktrees, settings, transcripts)
+.claude/
+
 # Raw data dirs (per-checkout, not source)
 E. coli/
 
