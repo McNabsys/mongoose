@@ -127,12 +127,24 @@ class CachedMoleculeDataset(Dataset):
         warmstart_centers = gt.get("warmstart_probe_centers_samples")
         warmstart_durations = gt.get("warmstart_probe_durations_samples")
 
-        # Build warmstart heatmap in-memory when the cached arrays are
-        # present; otherwise this molecule contributes no warmstart signal.
+        # V4 schema: centers/durations are PAIRED 1:1 with
+        # ``reference_bp_positions``; entries with center == -1 are
+        # sentinels for probes that were dropped by the duration_ms
+        # filter at GT-build time. Filter them out for heatmap
+        # construction (the heatmap doesn't care about reference
+        # pairing). The raw arrays are still passed through for the
+        # noise-model loss, which masks the -1 entries during NLL
+        # computation.
         if warmstart_centers is not None and warmstart_durations is not None:
-            warmstart_np = build_probe_heatmap(
-                int(num_samples), warmstart_centers, warmstart_durations
-            )
+            valid_mask = np.asarray(warmstart_centers) != -1
+            valid_centers = np.asarray(warmstart_centers)[valid_mask]
+            valid_durations = np.asarray(warmstart_durations)[valid_mask]
+            if valid_centers.size > 0:
+                warmstart_np = build_probe_heatmap(
+                    int(num_samples), valid_centers, valid_durations
+                )
+            else:
+                warmstart_np = None
         else:
             warmstart_np = None
 

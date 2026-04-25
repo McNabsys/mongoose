@@ -141,24 +141,42 @@ def build_molecule_gt(
         # offset within the TDB block's waveform). The sample index in the
         # cached waveform is therefore:
         #     (start_within_tdb_ms + probe.center_ms) * sample_rate_hz / 1000
+        #
+        # Schema invariant (V4): the centers/durations arrays are emitted
+        # PAIRED 1:1 with ``reference_bp_positions``. Probes with
+        # ``duration_ms <= 0`` (or where the .assigns slot is out of range)
+        # contribute SENTINELS instead of being dropped:
+        #   * center_sample = -1
+        #   * duration_samples = 0.0
+        # Consumers (build_probe_heatmap, NoiseModelLoss) must filter the
+        # sentinels before use. The pre-V4 schema dropped invalid probes,
+        # which gave warmstart_centers a SUBSET of reference_bp_positions
+        # and broke 1:1 pairing in the noise-model NLL.
         sample_period_ms = 1000.0 / sample_rate_hz
         mol_start_ms = float(mol.start_within_tdb_ms)
         centers: list[int] = []
         durations: list[float] = []
         for mol_probe_idx, _bp in unique_matched:
             if mol_probe_idx >= len(mol.probes):
+                centers.append(-1)
+                durations.append(0.0)
                 continue
             probe = mol.probes[mol_probe_idx]
             if probe.duration_ms <= 0:
+                centers.append(-1)
+                durations.append(0.0)
                 continue
             centers.append(
                 int(round((mol_start_ms + probe.center_ms) / sample_period_ms))
             )
             durations.append(float(probe.duration_ms / sample_period_ms))
 
-        if centers:
-            warmstart_centers = np.array(centers, dtype=np.int64)
-            warmstart_durations = np.array(durations, dtype=np.float32)
+        # The arrays now have the same length as reference_bp_positions
+        # by construction; emit them whenever any centers were generated
+        # (even if all are sentinels -- that's a "no warmstart" molecule
+        # but the schema still holds).
+        warmstart_centers = np.array(centers, dtype=np.int64)
+        warmstart_durations = np.array(durations, dtype=np.float32)
 
     return MoleculeGT(
         reference_bp_positions=reference_bp_positions,

@@ -246,20 +246,27 @@ class NoiseModelLoss(nn.Module):
                     gt_centers = peak_indices[:k].to(device=device, dtype=torch.long)
                     ref_bp = ref_bp[:k]
 
-            # Length mismatch guard: ground_truth.py builds
-            # ``warmstart_probe_centers_samples`` as a strict subset of
-            # ``reference_bp_positions`` (probes with duration_ms <= 0 are
-            # dropped from warmstart but kept in reference). The interval /
-            # position NLLs assume 1:1 pairing, so we skip molecules whose
-            # arrays differ in length until the data layer supplies an
-            # explicit ``warmstart_ref_indices`` mapping. Affected molecules
-            # still receive probe-loss supervision via the centernet path.
-            if (
-                gt_centers is not None
-                and ref_bp.numel() >= 2
-                and gt_centers.numel() != ref_bp.numel()
-            ):
-                gt_centers = None  # forces the degenerate-fallback branch
+            # V4 schema: gt_centers and ref_bp are paired 1:1, with -1
+            # sentinels in gt_centers for probes that ground_truth.py
+            # dropped at GT-build time (duration_ms <= 0). Mask out the
+            # sentinels and compute NLL on the remaining valid pairs.
+            #
+            # Legacy caches (pre-V4) emit gt_centers as a strict subset
+            # of ref_bp -- length-mismatched arrays without sentinels.
+            # For those we fall back to the "skip noise-model NLLs"
+            # behaviour (the molecule still receives probe-loss
+            # supervision via the centernet path).
+            if gt_centers is not None and ref_bp.numel() >= 2:
+                if gt_centers.numel() == ref_bp.numel():
+                    valid_mask = gt_centers >= 0
+                    if int(valid_mask.sum().item()) < 2:
+                        gt_centers = None  # not enough valid pairs
+                    else:
+                        gt_centers = gt_centers[valid_mask]
+                        ref_bp = ref_bp[valid_mask]
+                else:
+                    # Legacy schema: lengths differ, no sentinels.
+                    gt_centers = None
 
             if gt_centers is not None and ref_bp.numel() >= 2:
                 gt_centers = gt_centers.clamp(0, pred_h_b.shape[0] - 1)
