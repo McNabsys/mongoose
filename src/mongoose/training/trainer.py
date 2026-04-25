@@ -18,6 +18,7 @@ from mongoose.data.collate import collate_molecules
 from mongoose.data.dataset import SyntheticMoleculeDataset
 from mongoose.losses.combined import CombinedLoss
 from mongoose.losses.l511 import L511Loss
+from mongoose.losses.noise_model_loss import NoiseModelLoss
 from mongoose.model.unet import T2DUNet
 from mongoose.training.config import TrainConfig
 
@@ -61,10 +62,18 @@ class Trainer:
             probe_aware_velocity=config.probe_aware_velocity,
         ).to(self.device)
 
-        # Loss: CombinedLoss (V1 rearch) by default; L511Loss (V3 spike) when
-        # ``config.use_l511`` is set. Both have matching ``__call__`` signatures
-        # and emit identical ``details`` dict keys, so the rest of the trainer
-        # and TB logging paths are untouched.
+        # Loss selection. Three top-level options, mutually exclusive:
+        #   - L511Loss (V3 spike): config.use_l511
+        #   - NoiseModelLoss (V4, Direction A): config.use_noise_model
+        #   - CombinedLoss (V1 rearch, default)
+        # All three share the same ``__call__`` signature and emit the
+        # canonical ``probe/bp/vel/count`` detail keys, so the rest of the
+        # trainer (TB logging, console output) is untouched.
+        if config.use_l511 and config.use_noise_model:
+            raise ValueError(
+                "use_l511 and use_noise_model are mutually exclusive top-level "
+                "loss choices; pick one."
+            )
         if config.use_l511:
             self.criterion = L511Loss(
                 lambda_511=config.lambda_511,
@@ -76,6 +85,24 @@ class Trainer:
                 warmstart_fade_epochs=config.warmstart_fade_epochs,
                 min_blend=max(config.min_blend, 0.05),  # round-6 elastic tether
             )
+        elif config.use_noise_model:
+            self.criterion = NoiseModelLoss(
+                lambda_bp=config.lambda_bp,
+                lambda_vel=config.lambda_vel,
+                lambda_count=config.lambda_count,
+                lambda_stretch_prior=config.lambda_stretch_prior,
+                warmstart_epochs=config.warmstart_epochs,
+                warmstart_fade_epochs=config.warmstart_fade_epochs,
+                peakiness_window=config.peakiness_window,
+                nms_threshold=config.nms_threshold,
+                position_sigma_bp=config.position_sigma_bp,
+                S_init=config.S_init,
+                min_blend=config.min_blend,
+                scale_probe=config.scale_probe,
+                scale_bp=config.scale_bp,
+                scale_vel=config.scale_vel,
+                scale_count=config.scale_count,
+            ).to(self.device)
         else:
             self.criterion = CombinedLoss(
                 lambda_bp=config.lambda_bp,
@@ -94,9 +121,16 @@ class Trainer:
                 scale_count=config.scale_count,
             )
 
+        # Trainable parameters: model weights plus any criterion parameters
+        # (e.g. NoiseModelLoss.log_S). The criterion classes that aren't
+        # nn.Module subclasses contribute an empty list, so this is safe.
+        self._trainable_params: list[torch.nn.Parameter] = list(self.model.parameters())
+        if isinstance(self.criterion, torch.nn.Module):
+            self._trainable_params.extend(self.criterion.parameters())
+
         # Optimizer
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
+            self._trainable_params,
             lr=config.learning_rate,
             weight_decay=config.weight_decay,
         )
@@ -322,7 +356,7 @@ class Trainer:
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.config.grad_clip_norm
+                self._trainable_params, self.config.grad_clip_norm
             )
             self.scaler.step(self.optimizer)
             self.scaler.update()

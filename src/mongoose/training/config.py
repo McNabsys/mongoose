@@ -84,6 +84,18 @@ class TrainConfig:
     lambda_align: float = 0.0  # 0 disables
     align_min_confidence: float = 0.7  # min match-ratio
 
+    # V4 (Direction A): replace CombinedLoss with NoiseModelLoss, which
+    # uses NLL terms drawn from the Nabsys nanodetector noise model
+    # (sigma = S * sqrt(L_ref) per-interval Gaussian, sigma = 50 bp
+    # per-probe Gaussian, proximity-aware count, Gaussian prior on the
+    # closed-form ML stretch). Mutually exclusive with use_l511.
+    use_noise_model: bool = False
+    lambda_stretch_prior: float = 1.0
+    position_sigma_bp: float = 50.0
+    # Initial value of the learnable per-interval noise-scale parameter
+    # S (clamped at runtime to [4.1, 5.5] per the appendix).
+    S_init: float = 5.0
+
     # Checkpointing
     checkpoint_dir: Path = Path("checkpoints")
     save_every: int = 5  # epochs

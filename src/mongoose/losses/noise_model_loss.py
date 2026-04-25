@@ -188,8 +188,16 @@ class NoiseModelLoss(nn.Module):
             raw_v_b = raw_velocity[b]
             mask_b = mask[b]
 
+            # Grad-attached zero -- used as the initial value for components
+            # that may legitimately end up zero (degenerate batches). Without
+            # this, torch.zeros(()) is a no-grad leaf, and a batch where all
+            # terms degenerate produces a total loss with no grad_fn -- so
+            # loss.backward() raises. Real training never hits this; synthetic
+            # batches with warmstart_probability < 1 sometimes do.
+            grad_zero = pred_h_b.sum() * 0.0
+
             # ----------------- L_probe (unchanged from CombinedLoss) -----------------
-            probe_component = torch.zeros((), device=device, dtype=pred_h_b.dtype)
+            probe_component = grad_zero
             if (
                 blend > 0.0
                 and warmstart_heatmap is not None
@@ -274,13 +282,12 @@ class NoiseModelLoss(nn.Module):
                     )
                 )
             else:
-                # Degenerate: no usable peaks. Append zero so the term stays
-                # in the running mean (avoids nan denominator).
-                zero_b = torch.zeros((), device=device, dtype=pred_h_b.dtype)
-                bp_terms.append(zero_b)
-                vel_terms.append(zero_b)
-                count_terms.append(zero_b)
-                stretch_prior_terms.append(zero_b)
+                # Degenerate: no usable peaks. Use grad-attached zero so a
+                # whole batch of degenerate molecules still has a grad chain.
+                bp_terms.append(grad_zero)
+                vel_terms.append(grad_zero)
+                count_terms.append(grad_zero)
+                stretch_prior_terms.append(grad_zero)
                 # No stretch_v emitted for this molecule.
 
         zero = torch.zeros((), device=device, dtype=pred_heatmap.dtype)

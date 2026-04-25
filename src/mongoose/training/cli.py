@@ -210,6 +210,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--use-noise-model",
+        action="store_true",
+        help=(
+            "V4 (Direction A): replace CombinedLoss with NoiseModelLoss "
+            "(per-interval Gaussian NLL with sigma = S * sqrt(L_ref), "
+            "per-probe sigma = 50 bp position prior, proximity-aware count, "
+            "Gaussian prior on the closed-form ML stretch). Mutually "
+            "exclusive with --use-l511."
+        ),
+    )
+    parser.add_argument(
+        "--lambda-stretch-prior",
+        type=float,
+        default=None,
+        help="Weight on the per-molecule stretch Gaussian prior (only with --use-noise-model).",
+    )
+    parser.add_argument(
+        "--position-sigma-bp",
+        type=float,
+        default=None,
+        help=(
+            "Per-probe absolute-position Gaussian sigma in bp (only with "
+            "--use-noise-model). Default 50 bp from the noise-model appendix."
+        ),
+    )
+    parser.add_argument(
+        "--S-init",
+        type=float,
+        default=None,
+        help=(
+            "Initial value of the learnable per-interval scale parameter S "
+            "(only with --use-noise-model). Clamped at runtime to [4.1, 5.5]."
+        ),
+    )
+    parser.add_argument(
         "--align-min-confidence",
         type=float,
         default=None,
@@ -337,6 +372,14 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         config.lambda_align = args.lambda_align
     if args.align_min_confidence is not None:
         config.align_min_confidence = args.align_min_confidence
+    if args.use_noise_model:
+        config.use_noise_model = True
+    if args.lambda_stretch_prior is not None:
+        config.lambda_stretch_prior = args.lambda_stretch_prior
+    if args.position_sigma_bp is not None:
+        config.position_sigma_bp = args.position_sigma_bp
+    if args.S_init is not None:
+        config.S_init = args.S_init
     if args.use_wandb:
         config.use_wandb = True
     if args.wandb_project is not None:
