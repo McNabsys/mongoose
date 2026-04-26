@@ -53,7 +53,7 @@ from torch.utils.data import Dataset
 
 
 PROBE_WIDTH_NORM_BP = 831.0  # analytical expected width (FOM, default channel)
-FEATURE_DIM = 22
+FEATURE_DIM = 30  # 22 base + 8 detector-invariant fingerprint features (V5-Lite)
 
 
 def add_molecule_aggregates(df: pd.DataFrame) -> pd.DataFrame:
@@ -146,6 +146,31 @@ def extract_features(df: pd.DataFrame) -> np.ndarray:
 
     # Length-group bin (1) -- pass through, models can embed if needed
     out[:, 21] = df["length_group_bin"].to_numpy(dtype=np.float32)
+
+    # Detector-invariant fingerprint features (V5-Lite, 8 features).
+    # Per-molecule physical properties from probes.bin (broadcast to each
+    # of the molecule's probes). Different detectors / V / psi conditions
+    # produce systematically different rise/fall profiles and lvl1
+    # amplitudes, so the model can self-discover per-detector
+    # conditioning without exposing detector ID.
+    #
+    # rise/fall times in probes.bin can be negative (measured relative to
+    # molecule center, with rise typically negative and fall positive).
+    # We pass them through scaled by 10 ms (typical magnitude) without a
+    # log transform so the sign carries information. Transloc time is
+    # always positive so log is fine.
+    def _col(name: str) -> np.ndarray:
+        if name in df.columns:
+            return df[name].to_numpy(dtype=np.float32)
+        return np.zeros(n, dtype=np.float32)
+    out[:, 22] = _col("rise_t10_ms") / 10.0
+    out[:, 23] = _col("rise_t50_ms") / 10.0
+    out[:, 24] = _col("rise_t90_ms") / 10.0
+    out[:, 25] = _col("fall_t10_ms") / 10.0
+    out[:, 26] = _col("fall_t50_ms") / 10.0
+    out[:, 27] = _col("fall_t90_ms") / 10.0
+    out[:, 28] = _col("mean_lvl1") / 1000.0  # convert to mV-ish scale
+    out[:, 29] = np.log(np.clip(_col("transloc_time_ms") + 1.0, 1.0, None))
 
     return out
 

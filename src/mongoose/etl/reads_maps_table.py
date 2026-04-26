@@ -35,6 +35,7 @@ import numpy as np
 import pandas as pd
 
 from mongoose.io.assigns import MoleculeAssignment, load_assigns
+from mongoose.io.probes_bin import load_probes_bin
 from mongoose.io.reads_maps_bin import (
     MapMolecule,
     PROBE_ATTR_ACCEPTED,
@@ -107,8 +108,18 @@ def _build_molecule_rows(
     assigns_entry: MoleculeAssignment | None,
     refmap: ReferenceMap,
     run_id: str,
+    fingerprint: dict | None = None,
 ) -> list[dict]:
-    """Produce one row per probe for a single molecule."""
+    """Produce one row per probe for a single molecule.
+
+    Args:
+        fingerprint: Optional per-molecule physical fingerprint values
+            (parsed from probes.bin's Molecule dataclass). When provided,
+            the rise/fall times, mean_lvl1, transloc_time_ms are
+            broadcast to each row's columns. Detector-invariant features
+            for V5: same values measured on different detectors carry
+            implicit conditioning without exposing detector ID.
+    """
     if pre_mol.uid != post_mol.uid:
         raise ValueError(
             f"pre/post uid mismatch in {run_id}: pre={pre_mol.uid} post={post_mol.uid}"
@@ -256,6 +267,19 @@ def _build_molecule_rows(
                 "ref_probe_idx_1based": ref_probe_idx_1based,
                 "reference_position_bp": ref_position_bp,
                 "has_reference": has_reference,
+                # Per-molecule fingerprint features (V5-Lite).
+                # Detector-invariant proxies for the per-detector
+                # calibration variation production handles via
+                # _remapSettings.txt. Broadcast same value to each
+                # probe in the molecule.
+                "rise_t10_ms": float(fingerprint["rise_t10"]) if fingerprint else 0.0,
+                "rise_t50_ms": float(fingerprint["rise_t50"]) if fingerprint else 0.0,
+                "rise_t90_ms": float(fingerprint["rise_t90"]) if fingerprint else 0.0,
+                "fall_t10_ms": float(fingerprint["fall_t10"]) if fingerprint else 0.0,
+                "fall_t50_ms": float(fingerprint["fall_t50"]) if fingerprint else 0.0,
+                "fall_t90_ms": float(fingerprint["fall_t90"]) if fingerprint else 0.0,
+                "mean_lvl1": float(fingerprint["mean_lvl1"]) if fingerprint else 0.0,
+                "transloc_time_ms": float(fingerprint["transloc_time_ms"]) if fingerprint else 0.0,
                 # Targets
                 "post_position_bp": int(post_positions[k]),
                 "residual_bp": residual_bp,
@@ -272,7 +296,36 @@ def _build_molecule_rows(
     return rows
 
 
-def build_residual_table(remap_dir: Path, run_id: str) -> pd.DataFrame:
+def _find_probes_bin(remap_dir: Path, run_id: str) -> Path | None:
+    """Auto-discover the run's probes.bin file given a Remapped/AllCh dir.
+
+    Layout convention: ``.../{run_id}/{date}/Results/.../pp-705/AllCh/{run_id}_probes.bin``
+    while remap_dir is ``.../{run_id}/{date}/Remapped/AllCh``. We walk up
+    two levels to ``{date}`` and rglob for the probes.bin file. Prefers a
+    path containing ``pp-705`` over ``Remapped/AllCh`` (the latter has a
+    post-remap copy that we don't want).
+    """
+    parent = remap_dir.parent.parent  # back to {date}
+    if not parent.exists():
+        return None
+    target = f"{run_id}_probes.bin"
+    candidates = [
+        c for c in parent.rglob(target)
+        if c.name == target  # exact match (rules out .files / _index)
+    ]
+    pp705 = [c for c in candidates if "pp-705" in str(c)]
+    if pp705:
+        return pp705[0]
+    return candidates[0] if candidates else None
+
+
+def build_residual_table(
+    remap_dir: Path,
+    run_id: str,
+    *,
+    probes_bin_path: Path | None = None,
+    include_fingerprint: bool = True,
+) -> pd.DataFrame:
     """Assemble a per-probe residual table for one run.
 
     Args:
@@ -281,6 +334,16 @@ def build_residual_table(remap_dir: Path, run_id: str) -> pd.DataFrame:
             ``*_reads_maps.bin``, ``*_probes.txt_probeassignment.assigns``,
             ``*_probes.txt_referenceMap.txt``).
         run_id: Run identifier prefix used to locate the files.
+        probes_bin_path: Optional explicit path to the run's probes.bin.
+            When None and ``include_fingerprint`` is True, the file is
+            auto-discovered via :func:`_find_probes_bin`. probes.bin is
+            needed only for the per-molecule physical fingerprint columns
+            (rise/fall times, mean_lvl1, transloc_time_ms); when not
+            available those columns are filled with zeros and downstream
+            features still work but lose detector-invariant signal.
+        include_fingerprint: Default True. When False, skip probes.bin
+            loading entirely (fingerprint columns are zero-filled). Useful
+            for fast iteration when fingerprint features aren't needed.
 
     Returns:
         A long-format DataFrame: one row per probe across all molecules
@@ -310,11 +373,34 @@ def build_residual_table(remap_dir: Path, run_id: str) -> pd.DataFrame:
         a.fragment_uid: a for a in assigns_list
     }
 
+    # Build (uid -> fingerprint) lookup from probes.bin when requested.
+    fingerprint_by_uid: dict[int, dict] = {}
+    if include_fingerprint:
+        if probes_bin_path is None:
+            probes_bin_path = _find_probes_bin(remap_dir, run_id)
+        if probes_bin_path is not None and probes_bin_path.exists():
+            probes_file = load_probes_bin(probes_bin_path)
+            for mol in probes_file.molecules:
+                fingerprint_by_uid[int(mol.uid)] = {
+                    "rise_t10": mol.rise_t10,
+                    "rise_t50": mol.rise_t50,
+                    "rise_t90": mol.rise_t90,
+                    "fall_t10": mol.fall_t10,
+                    "fall_t50": mol.fall_t50,
+                    "fall_t90": mol.fall_t90,
+                    "mean_lvl1": mol.mean_lvl1,
+                    "transloc_time_ms": mol.transloc_time_ms,
+                }
+
     all_rows: list[dict] = []
     for pre_mol, post_mol in zip(pre_file.molecules, post_file.molecules, strict=True):
         assigns_entry = assigns_by_uid.get(int(pre_mol.uid))
+        fp = fingerprint_by_uid.get(int(pre_mol.uid))
         all_rows.extend(
-            _build_molecule_rows(pre_mol, post_mol, assigns_entry, refmap, run_id)
+            _build_molecule_rows(
+                pre_mol, post_mol, assigns_entry, refmap, run_id,
+                fingerprint=fp,
+            )
         )
 
     return pd.DataFrame(all_rows)
