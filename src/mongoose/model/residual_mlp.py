@@ -18,6 +18,18 @@ import torch.nn as nn
 from mongoose.data.residual_dataset import FEATURE_DIM
 
 
+# Index of the length_group_bin feature within the FEATURE_DIM vector.
+# The bin is also a numeric feature in slot 21 (kept for backward-
+# compatibility with the V4-C and V5-Lite checkpoints), but Phase 1.5
+# also embeds it as a categorical so the model can learn distinct
+# correction curves per length-group (the production head-dive Method
+# 1 uses 16 length-group splines this way).
+LENGTH_GROUP_BIN_FEATURE_IDX = 21
+LENGTH_GROUP_NUM_BINS = 16  # bins 0..15
+LENGTH_GROUP_SENTINEL_IDX = 16  # remap -1 (out-of-range) to this slot
+LENGTH_GROUP_EMBED_DIM = 16
+
+
 class ResidualBlock(nn.Module):
     """Linear -> LayerNorm -> GELU -> Linear -> LayerNorm -> Dropout, with skip."""
 
@@ -62,6 +74,7 @@ class ResidualMLP(nn.Module):
         hidden_dim: int = 256,
         n_blocks: int = 4,
         dropout: float = 0.1,
+        use_length_group_embed: bool = True,
     ) -> None:
         super().__init__()
         if input_dim != FEATURE_DIM:
@@ -72,8 +85,24 @@ class ResidualMLP(nn.Module):
         self.input_dim = int(input_dim)
         self.hidden_dim = int(hidden_dim)
         self.n_blocks = int(n_blocks)
+        self.use_length_group_embed = bool(use_length_group_embed)
 
-        self.stem = nn.Linear(input_dim, hidden_dim)
+        # Phase 1.5: length-group embedding. Production's head-dive
+        # Method 1 uses 16 length-group splines with separate correction
+        # curves; we mirror that structure with a learned embedding so
+        # the model can produce length-group-conditioned corrections
+        # directly.
+        if self.use_length_group_embed:
+            # +1 slot for the -1 sentinel (out-of-range molecules).
+            self.length_group_embed = nn.Embedding(
+                LENGTH_GROUP_NUM_BINS + 1, LENGTH_GROUP_EMBED_DIM
+            )
+            stem_input_dim = input_dim + LENGTH_GROUP_EMBED_DIM
+        else:
+            self.length_group_embed = None
+            stem_input_dim = input_dim
+
+        self.stem = nn.Linear(stem_input_dim, hidden_dim)
         self.stem_norm = nn.LayerNorm(hidden_dim)
         self.stem_act = nn.GELU()
 
@@ -102,7 +131,25 @@ class ResidualMLP(nn.Module):
             raise ValueError(
                 f"expected features shape [B, {self.input_dim}]; got {tuple(features.shape)!r}"
             )
-        h = self.stem(features)
+
+        # Length-group embedding (Phase 1.5): extract the length_group_bin
+        # value from feature slot 21, map -1 sentinel to the dedicated
+        # embedding slot, look up + concat. The numeric slot stays in the
+        # feature vector too (cheap redundancy; lets the model use either
+        # representation as needed).
+        if self.length_group_embed is not None:
+            bin_long = features[:, LENGTH_GROUP_BIN_FEATURE_IDX].long()
+            bin_long = torch.where(
+                bin_long < 0,
+                torch.full_like(bin_long, LENGTH_GROUP_SENTINEL_IDX),
+                bin_long.clamp(0, LENGTH_GROUP_NUM_BINS - 1),
+            )
+            bin_emb = self.length_group_embed(bin_long)
+            stem_input = torch.cat([features, bin_emb], dim=-1)
+        else:
+            stem_input = features
+
+        h = self.stem(stem_input)
         h = self.stem_norm(h)
         h = self.stem_act(h)
         for block in self.blocks:
