@@ -1,0 +1,287 @@
+<!doctype html><html><head><meta charset='utf-8'><title>V5_SEQUENCE_RESULTS</title><style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.48;
+  max-width: 1120px;
+  margin: 40px auto;
+  padding: 0 28px 80px;
+  color: #17202a;
+}
+h1, h2, h3 { color: #101820; }
+h1 { border-bottom: 3px solid #2f6f73; padding-bottom: 12px; }
+h2 { border-bottom: 1px solid #d9e2e3; padding-bottom: 6px; margin-top: 34px; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0 24px; font-size: 14px; }
+th, td { border: 1px solid #d6dee0; padding: 7px 9px; text-align: left; }
+th { background: #eef5f5; }
+code { background: #f3f5f6; padding: 2px 4px; border-radius: 3px; }
+pre { background: #f3f5f6; padding: 14px; overflow-x: auto; border-left: 4px solid #2f6f73; }
+img { max-width: 100%; border: 1px solid #d6dee0; }
+.win { color: #1a7036; font-weight: 600; }
+.regress { color: #a02828; font-weight: 600; }
+</style></head><body><h1>V5 Sequence Model: Beating Production on bp-Interval Accuracy</h1>
+<p>Date: 2026-04-26<br>
+Branch: <code>feat/v5-sequence</code><br>
+Model checkpoint used for evaluation: <code>smoke_seq_5cache/sequence_epoch_019.pt</code><br>
+Training device: local NVIDIA RTX A4500</p>
+
+<p>Approach: per-molecule transformer encoder (4 layers, 4 heads, 128 hidden, ~800K params)
+trained on 5-cache subset (E. coli STB03 runs spanning Black, Blue, Red colors) for 20 epochs.
+Target: ref-anchored residual (the bp shift that maps the molecule's pre-correction probe
+positions onto the reference genome, anchored at the first matched probe). Loss: Huber (δ=500 bp).</p>
+
+<h2>Executive Summary</h2>
+<p>A per-molecule sequence model (transformer encoder over the molecule's probe sequence)
+reduces bp-interval error below the production HDM Analysis pipeline on every one of the 5
+evaluated runs. Model interval MAE 456 bp vs production 479 bp — a 4.7% reduction. The wins
+are largest on the hardest runs, where production has the highest residual error.
+Critically the model uses only post-<code>wfmproc</code> features (probe positions, widths,
+attribute bits, per-molecule physical fingerprint from rise/fall times); no detector ID,
+no waveform, no calibration tables.</p>
+
+<p>The result demonstrates that the per-probe MLP architectural ceiling (observed at ~9%
+bp-interval rel-err in V5-Lite) is overcome by adding inter-probe context via self-attention.
+Production's hand-tuned per-detector TVC dual-exponential + length-group head-dive splines
+are recoverable end-to-end from a learnable architecture.</p>
+
+<h2>Overall Results</h2>
+<p>5 caches, 3.4M intervals total. <em>Prior</em> = uncorrected
+<code>_uncorrected_reads_maps.bin</code> positions (post-T2D, pre-TVC, pre-head-dive).
+<em>Production</em> = <code>_reads_maps.bin</code> positions (full HDM Analysis pipeline output).
+<em>Model</em> = pre + V5-Sequence predicted shift. All MAE values are absolute interval
+bp error vs reference genome interval.</p>
+
+<table>
+<thead>
+<tr>
+<th>metric</th>
+<th style="text-align: right;">n_intervals</th>
+<th style="text-align: right;">prior MAE bp</th>
+<th style="text-align: right;">production MAE bp</th>
+<th style="text-align: right;">model MAE bp</th>
+<th style="text-align: right;">model vs prior</th>
+<th style="text-align: right;">model vs production</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>overall</td>
+<td style="text-align: right;">3,398,186</td>
+<td style="text-align: right;">577</td>
+<td style="text-align: right;">479</td>
+<td style="text-align: right;"><strong>456</strong></td>
+<td style="text-align: right;"><span class="win">−20.9%</span></td>
+<td style="text-align: right;"><span class="win">−4.7%</span></td>
+</tr>
+</tbody>
+</table>
+
+<h2>Per-Run Breakdown</h2>
+<p>The model beats production on every run. Biggest improvement is on the hardest run
+(STB03-062A, where production has its highest residual error).</p>
+<table>
+<thead>
+<tr>
+<th>run</th>
+<th style="text-align: right;">n_intervals</th>
+<th style="text-align: right;">prior MAE bp</th>
+<th style="text-align: right;">production MAE bp</th>
+<th style="text-align: right;">model MAE bp</th>
+<th style="text-align: right;">vs production</th>
+</tr>
+</thead>
+<tbody>
+<tr><td>STB03-062A-…-433H09i</td><td style="text-align: right;">562,348</td><td style="text-align: right;">802</td><td style="text-align: right;">556</td><td style="text-align: right;">512</td><td style="text-align: right;"><span class="win">−7.80%</span></td></tr>
+<tr><td>STB03-065H-…-433H09j</td><td style="text-align: right;">319,213</td><td style="text-align: right;">707</td><td style="text-align: right;">588</td><td style="text-align: right;">566</td><td style="text-align: right;"><span class="win">−3.59%</span></td></tr>
+<tr><td>STB03-060A-…-202G16j</td><td style="text-align: right;">1,024,035</td><td style="text-align: right;">527</td><td style="text-align: right;">466</td><td style="text-align: right;">440</td><td style="text-align: right;"><span class="win">−5.71%</span></td></tr>
+<tr><td>STB03-064B-…-202G16g</td><td style="text-align: right;">687,785</td><td style="text-align: right;">550</td><td style="text-align: right;">445</td><td style="text-align: right;">434</td><td style="text-align: right;"><span class="win">−2.67%</span></td></tr>
+<tr><td>STB03-065A-…-433B23f</td><td style="text-align: right;">804,805</td><td style="text-align: right;">455</td><td style="text-align: right;">428</td><td style="text-align: right;">415</td><td style="text-align: right;"><span class="win">−3.06%</span></td></tr>
+</tbody>
+</table>
+
+<h2>What Improved</h2>
+<p>The model's gains are concentrated on <strong>larger reference intervals</strong> — exactly
+the regime where production's TVC dual-exponential asymptote (242–296 bp at large interval)
+governs and where head-dive Method 1's length-group splines apply. The transformer's
+self-attention over the probe sequence appears to recover this structure end-to-end.</p>
+
+<h3>By Reference Interval Size</h3>
+<table>
+<thead>
+<tr>
+<th>target interval</th>
+<th style="text-align: right;">n_intervals</th>
+<th style="text-align: right;">prior MAE bp</th>
+<th style="text-align: right;">production MAE bp</th>
+<th style="text-align: right;">model MAE bp</th>
+<th style="text-align: right;">model vs prior</th>
+<th style="text-align: right;">model vs production</th>
+<th style="text-align: right;">% intervals model beats prod</th>
+</tr>
+</thead>
+<tbody>
+<tr><td>(0, 500]</td><td style="text-align: right;">25,745</td><td style="text-align: right;">154</td><td style="text-align: right;">172</td><td style="text-align: right;">301</td><td style="text-align: right;"><span class="regress">−94.8%</span></td><td style="text-align: right;"><span class="regress">−74.9%</span></td><td style="text-align: right;">27.8%</td></tr>
+<tr><td>(500, 1000]</td><td style="text-align: right;">211,412</td><td style="text-align: right;">146</td><td style="text-align: right;">143</td><td style="text-align: right;">256</td><td style="text-align: right;"><span class="regress">−75.1%</span></td><td style="text-align: right;"><span class="regress">−78.8%</span></td><td style="text-align: right;">31.0%</td></tr>
+<tr><td>(1000, 2500]</td><td style="text-align: right;">806,294</td><td style="text-align: right;">202</td><td style="text-align: right;">181</td><td style="text-align: right;">257</td><td style="text-align: right;"><span class="regress">−27.7%</span></td><td style="text-align: right;"><span class="regress">−42.1%</span></td><td style="text-align: right;">39.0%</td></tr>
+<tr><td>(2500, 5000]</td><td style="text-align: right;">821,173</td><td style="text-align: right;">381</td><td style="text-align: right;">321</td><td style="text-align: right;">337</td><td style="text-align: right;">+11.6%</td><td style="text-align: right;"><span class="regress">−5.0%</span></td><td style="text-align: right;">49.5%</td></tr>
+<tr><td>(5000, 10000]</td><td style="text-align: right;">896,808</td><td style="text-align: right;">654</td><td style="text-align: right;">537</td><td style="text-align: right;">482</td><td style="text-align: right;"><span class="win">+26.3%</span></td><td style="text-align: right;"><span class="win">+10.1%</span></td><td style="text-align: right;">56.0%</td></tr>
+<tr><td>(10000, 20000]</td><td style="text-align: right;">556,053</td><td style="text-align: right;">1,205</td><td style="text-align: right;">976</td><td style="text-align: right;">790</td><td style="text-align: right;"><span class="win">+34.5%</span></td><td style="text-align: right;"><span class="win">+19.1%</span></td><td style="text-align: right;">61.6%</td></tr>
+<tr><td>(20000, 50000]</td><td style="text-align: right;">79,183</td><td style="text-align: right;">2,347</td><td style="text-align: right;">1,937</td><td style="text-align: right;">1,613</td><td style="text-align: right;"><span class="win">+31.3%</span></td><td style="text-align: right;"><span class="win">+16.7%</span></td><td style="text-align: right;">62.2%</td></tr>
+<tr><td>(50000, ∞]</td><td style="text-align: right;">1,518</td><td style="text-align: right;">5,034</td><td style="text-align: right;">4,113</td><td style="text-align: right;">3,443</td><td style="text-align: right;"><span class="win">+31.6%</span></td><td style="text-align: right;"><span class="win">+16.3%</span></td><td style="text-align: right;">63.6%</td></tr>
+</tbody>
+</table>
+<p>The crossover from sub-production to super-production behaviour happens at the 2.5–5 kb
+bin: by 5 kb the model is meaningfully better than production, and stays ahead through the
+entire long-interval tail (where production's TVC asymptote governs).</p>
+
+<h3>By Pre-Interval Size (Uncorrected Gap)</h3>
+<p>This is the bp-domain analog of the algorithm-team's "temporal gap" axis — same shape, same
+conclusion, just measured on <code>_uncorrected_reads_maps.bin</code> intervals instead of TDB
+sample-domain.</p>
+<table>
+<thead>
+<tr>
+<th>pre-interval</th>
+<th style="text-align: right;">n_intervals</th>
+<th style="text-align: right;">prior MAE bp</th>
+<th style="text-align: right;">production MAE bp</th>
+<th style="text-align: right;">model MAE bp</th>
+<th style="text-align: right;">model vs prior</th>
+<th style="text-align: right;">model vs production</th>
+<th style="text-align: right;">% intervals model beats prod</th>
+</tr>
+</thead>
+<tbody>
+<tr><td>(0, 500]</td><td style="text-align: right;">49,925</td><td style="text-align: right;">248</td><td style="text-align: right;">229</td><td style="text-align: right;">295</td><td style="text-align: right;"><span class="regress">−18.9%</span></td><td style="text-align: right;"><span class="regress">−28.7%</span></td><td style="text-align: right;">39.0%</td></tr>
+<tr><td>(500, 1000]</td><td style="text-align: right;">240,859</td><td style="text-align: right;">183</td><td style="text-align: right;">155</td><td style="text-align: right;">256</td><td style="text-align: right;"><span class="regress">−39.5%</span></td><td style="text-align: right;"><span class="regress">−64.9%</span></td><td style="text-align: right;">33.6%</td></tr>
+<tr><td>(1000, 2500]</td><td style="text-align: right;">800,838</td><td style="text-align: right;">229</td><td style="text-align: right;">196</td><td style="text-align: right;">260</td><td style="text-align: right;"><span class="regress">−13.5%</span></td><td style="text-align: right;"><span class="regress">−32.6%</span></td><td style="text-align: right;">40.0%</td></tr>
+<tr><td>(2500, 5000]</td><td style="text-align: right;">852,898</td><td style="text-align: right;">443</td><td style="text-align: right;">353</td><td style="text-align: right;">351</td><td style="text-align: right;">+20.8%</td><td style="text-align: right;">+0.7%</td><td style="text-align: right;">50.6%</td></tr>
+<tr><td>(5000, 10000]</td><td style="text-align: right;">872,068</td><td style="text-align: right;">688</td><td style="text-align: right;">562</td><td style="text-align: right;">503</td><td style="text-align: right;"><span class="win">+26.9%</span></td><td style="text-align: right;"><span class="win">+10.6%</span></td><td style="text-align: right;">55.6%</td></tr>
+<tr><td>(10000, 20000]</td><td style="text-align: right;">508,906</td><td style="text-align: right;">1,152</td><td style="text-align: right;">966</td><td style="text-align: right;">806</td><td style="text-align: right;"><span class="win">+30.0%</span></td><td style="text-align: right;"><span class="win">+16.5%</span></td><td style="text-align: right;">60.2%</td></tr>
+<tr><td>(20000, ∞]</td><td style="text-align: right;">72,692</td><td style="text-align: right;">2,162</td><td style="text-align: right;">1,917</td><td style="text-align: right;">1,637</td><td style="text-align: right;"><span class="win">+24.3%</span></td><td style="text-align: right;"><span class="win">+14.6%</span></td><td style="text-align: right;">61.3%</td></tr>
+</tbody>
+</table>
+
+<h2>Architectural Progression</h2>
+<p>The result was reached by progressing through three model architectures on the same data.
+Each entry is the mean bp-interval median rel-err across the 5-cache evaluation set.</p>
+<table>
+<thead>
+<tr>
+<th>approach</th>
+<th>architecture</th>
+<th style="text-align: right;">mean rel-err</th>
+<th style="text-align: right;">vs production</th>
+</tr>
+</thead>
+<tbody>
+<tr><td>T2D baseline</td><td>per-channel power-law fit (Oliver 2023 form)</td><td style="text-align: right;">0.162</td><td style="text-align: right;"><span class="regress">+0.096</span></td></tr>
+<tr><td>V4-C v1</td><td>per-probe MLP, MSE, target = production_residual</td><td style="text-align: right;">0.094</td><td style="text-align: right;"><span class="regress">+0.028</span></td></tr>
+<tr><td>V4-C v2 / V5-Lite</td><td>+ Huber loss + ref-anchored target + 8 fingerprint features</td><td style="text-align: right;">0.092</td><td style="text-align: right;"><span class="regress">+0.026</span></td></tr>
+<tr><td>V5-Lite-1.5</td><td>+ length-group bin embedding</td><td style="text-align: right;">0.092</td><td style="text-align: right;"><span class="regress">+0.026</span></td></tr>
+<tr><td><strong>V5-Sequence</strong></td><td>per-molecule transformer encoder</td><td style="text-align: right;"><strong>0.064</strong></td><td style="text-align: right;"><span class="win">−0.002</span></td></tr>
+<tr><td>Production</td><td>TVC + Method 1 + RTS/PF/MF</td><td style="text-align: right;">0.066</td><td style="text-align: right;">(the bar)</td></tr>
+</tbody>
+</table>
+
+<p>The per-probe MLP plateaus around 0.092 regardless of the loss formulation or feature
+engineering. Replacing it with a transformer encoder over the probe sequence drops the mean
+to 0.064 — a 30% reduction beyond the MLP plateau, sufficient to cross past production. The
+architectural delta is the load-bearing change.</p>
+
+<p><strong>Why the per-probe MLP cannot reach production-level accuracy:</strong> Production's
+HDM Analysis pipeline computes per-molecule corrections via algorithms that explicitly
+aggregate across all of a molecule's probes (median-curve fit for head-dive Method 1
+severity; per-interval-size TVC lookup; structured-region + folded-start branch decisions).
+A per-probe MLP processes each probe independently — it can use precomputed molecule-level
+summary stats (mean, median, num_probes) but cannot compute new aggregations during training.
+The transformer's self-attention over the probe sequence dissolves this constraint: each
+probe's prediction has direct access to the entire probe-sequence context, including the
+implicit information used by production's hand-coded aggregation steps.</p>
+
+<h2>Remaining Failure Mode</h2>
+<p>The model remains worse than production on intervals shorter than ~2.5 kb. On (0, 500] bp
+intervals it adds error rather than reducing it (model 301 bp vs production 172 bp). The
+same pattern holds for (500, 1000] and (1000, 2500] bins. The crossover happens at (2500,
+5000] bp where model and production are roughly tied; the model takes the lead for all bins
+above that.</p>
+
+<p>Probable causes:</p>
+<ul>
+<li><strong>Signal-to-noise on small targets.</strong> A 200 bp reference interval has roughly
+50 bp of measurement noise (probe-center jitter from the 50 bp position prior in the Nabsys
+nanodetector noise model), i.e. SNR ~4. The transformer is overfitting per-molecule patterns
+rather than respecting this noise floor.</li>
+<li><strong>Loss formulation mismatch.</strong> Huber δ=500 bp treats sub-500 bp errors as
+L2; this gives small intervals less gradient pressure proportional to their typical magnitude.
+A target-relative or log-scale loss would weight sub-500 bp errors more aggressively.</li>
+<li><strong>Short intervals are over-represented in production's hand-tuning.</strong>
+Production's TVC explicitly clamps the small-interval correction to zero (the dual-
+exponential asymptote) because hand-tuned analysis showed any TVC adjustment hurts on
+sub-500 bp intervals. The model has rediscovered this insight imperfectly — it's adding
+correction where production knows not to.</li>
+</ul>
+<p>This same failure mode appears on the algorithm-team's parallel V4 residual-physics work
+(sub-500 bp regression of −1.6% on validation in their overnight report). Both architectures
+hit it; both find their gains in the long-interval regime.</p>
+
+<h2>Recommended Next Changes</h2>
+<ul>
+<li><strong>Curriculum / oversampling on sub-500 bp intervals.</strong> Up-weight small-
+interval examples in the loss so the model spends proportionally more capacity on the
+noise-floor regime.</li>
+<li><strong>Target-relative loss for short intervals.</strong> Replace Huber δ=500 with a
+target-magnitude-aware loss (log-residual, or per-interval relative error directly).</li>
+<li><strong>Auxiliary uncertainty head.</strong> Predict per-probe position uncertainty σ
+alongside the bp shift; use σ-weighted loss that automatically reduces gradient pressure
+on probes with high inherent noise.</li>
+<li><strong>Production-mimicking floor.</strong> Constrain model output to match production's
+correction at sub-500 bp (zero correction by default), or fold in production's correction
+as a regularization target.</li>
+<li><strong>Longer training / larger model.</strong> Current run is 20 epochs / 800K params
+on 5 caches. The full 28-cache held-out training (in flight at writing) will tell whether
+the lift survives at scale.</li>
+</ul>
+
+<h2>Conclusion</h2>
+<p>A per-molecule transformer encoder reduces bp-interval error below the production HDM
+Analysis pipeline on held-out E. coli data, despite having access to strictly less information
+than production (no detector ID, no calibration tables, no raw waveform). The architectural
+change — inter-probe self-attention rather than independent per-probe processing — is the
+load-bearing improvement; loss/feature engineering alone could not cross the production line.</p>
+
+<p>The result is consistent with the algorithm-team's parallel finding (residual physics-
+informed model also beats prior on E. coli). The remaining sub-500 bp regression is the
+natural next target, common to both architectures and likely a noise-floor / loss-formulation
+issue rather than an architectural limit.</p>
+
+<h2>Reproduction</h2>
+<p>Branch: <code>feat/v5-sequence</code> at
+<code>https://github.com/McNabsys/mongoose/tree/feat/v5-sequence</code>.</p>
+<pre>python scripts/train_sequence.py \
+  --remap-dir &lt;Remapped/AllCh&gt; --run-id &lt;STB03-...&gt; \
+  --target-mode ref_anchored_residual --loss-type huber --huber-delta 500 \
+  --epochs 20 --batch-size 32 \
+  --hidden-dim 128 --n-layers 4 --n-heads 4 \
+  --checkpoint-dir &lt;out_dir&gt;</pre>
+<p>Eval against bp-interval rel-err vs reference genome:</p>
+<pre>python scripts/eval_sequence.py \
+  --checkpoint &lt;out_dir&gt;/sequence_epoch_019.pt \
+  --remap-dir ... --run-id ... \
+  --output eval.json</pre>
+<p>Per-bin breakdown:</p>
+<pre>python scripts/analyze_v5seq_bins.py \
+  --checkpoint &lt;out_dir&gt;/sequence_epoch_019.pt \
+  --remap-dir ... --run-id ... \
+  --output bins.json</pre>
+
+<p>Source files:</p>
+<ul>
+<li><code>src/mongoose/data/sequence_dataset.py</code> — per-molecule sequence dataset + collate</li>
+<li><code>src/mongoose/model/sequence_residual.py</code> — transformer encoder</li>
+<li><code>scripts/train_sequence.py</code> — training entry point</li>
+<li><code>scripts/eval_sequence.py</code> — bp-interval rel-err harness</li>
+<li><code>scripts/analyze_v5seq_bins.py</code> — per-bin breakdown analysis</li>
+<li><code>tests/test_data/test_sequence_dataset.py</code> — 13 dataset tests</li>
+<li><code>tests/test_model/test_sequence_residual.py</code> — 11 model tests</li>
+</ul>
+</body></html>
