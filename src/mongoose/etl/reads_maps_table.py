@@ -143,6 +143,34 @@ def _build_molecule_rows(
 
     direction = int(getattr(assigns_entry, "direction", 0)) if assigns_entry else 0
 
+    # Pre-pass: identify the FIRST accepted probe with a reference match.
+    # ``ref_anchored_residual_bp`` is the bp shift that, applied to
+    # ``pre_position_bp``, would put the probe at the genome's known
+    # position relative to the molecule's first matched probe. We anchor
+    # both pre and ref at this first matched probe, so the per-probe
+    # target encodes only the SHAPE of the correction along the molecule
+    # (not a per-molecule constant offset which production might be
+    # arbitrary about). For probes BEFORE the first matched probe (or
+    # with no reference at all), ref_anchored_residual_bp = 0.
+    first_matched_pre_bp = None
+    first_matched_ref_bp = None
+    if assigns_entry is not None:
+        running_accepted = 0
+        for kk in range(n_probes):
+            if not bool(accepted_mask[kk]):
+                continue
+            if running_accepted < len(assigns_entry.probe_indices):
+                ref_idx_kk = int(assigns_entry.probe_indices[running_accepted])
+                if ref_idx_kk > 0:
+                    try:
+                        pos_kk, _ = refmap.lookup(ref_idx_kk)
+                        first_matched_pre_bp = int(pre_positions[kk])
+                        first_matched_ref_bp = int(pos_kk)
+                        break
+                    except IndexError:
+                        pass
+            running_accepted += 1
+
     rows: list[dict] = []
     accepted_idx = 0  # increments only for accepted probes
     for k in range(n_probes):
@@ -169,6 +197,20 @@ def _build_molecule_rows(
             accepted_idx += 1
 
         residual_bp = int(post_positions[k] - pre_positions[k])
+
+        # Anchored-to-first-matched ideal-correction target. Equals 0 for
+        # the first matched probe (it IS the anchor) and for unmatched
+        # probes (no ref to anchor against).
+        if (
+            has_reference
+            and first_matched_pre_bp is not None
+            and first_matched_ref_bp is not None
+        ):
+            pre_anchored = int(pre_positions[k]) - first_matched_pre_bp
+            ref_anchored = abs(int(ref_position_bp) - first_matched_ref_bp)
+            ref_anchored_residual_bp = int(ref_anchored - pre_anchored)
+        else:
+            ref_anchored_residual_bp = 0
 
         frac_pos = float(k) / max(n_probes - 1, 1)
         bp_pos_frac = (
@@ -217,6 +259,13 @@ def _build_molecule_rows(
                 # Targets
                 "post_position_bp": int(post_positions[k]),
                 "residual_bp": residual_bp,
+                # V4-C-v2: target the GENOME directly (not production's
+                # output). Anchoring at first matched probe removes per-
+                # molecule constant offsets; the model learns only the
+                # SHAPE of the correction along the molecule. Beating
+                # production becomes possible if the model captures
+                # signal production's hand-tuned curves miss.
+                "ref_anchored_residual_bp": ref_anchored_residual_bp,
             }
         )
 

@@ -201,6 +201,8 @@ class ResidualDataset(Dataset):
         *,
         accepted_only: bool = True,
         compute_aggregates: bool = True,
+        target_column: str = "residual_bp",
+        require_reference: bool = False,
     ) -> None:
         """
         Args:
@@ -212,6 +214,17 @@ class ResidualDataset(Dataset):
             compute_aggregates: When True (default), call
                 :func:`add_molecule_aggregates` first. Pass False if
                 ``df`` already has the aggregate columns.
+            target_column: Which column to use as the regression target.
+                ``"residual_bp"`` (default) trains the model to mimic
+                production's correction (post - pre, ceiling = production).
+                ``"ref_anchored_residual_bp"`` trains against the genome
+                directly (anchored at the first matched probe), which has
+                no a-priori ceiling and could in principle beat production.
+            require_reference: When True, additionally drop probes
+                without a reference match (``has_reference == False``).
+                Set this to True when ``target_column ==
+                "ref_anchored_residual_bp"`` because the target is
+                undefined for unmatched probes.
         """
         if compute_aggregates and "mean_probe_width_bp" not in df.columns:
             df = add_molecule_aggregates(df)
@@ -223,14 +236,23 @@ class ResidualDataset(Dataset):
 
         if accepted_only:
             df = df[df["accepted"]].reset_index(drop=True)
+        if require_reference:
+            df = df[df["has_reference"]].reset_index(drop=True)
+
+        if target_column not in df.columns:
+            raise ValueError(
+                f"target_column={target_column!r} not in df. "
+                f"Available columns: {sorted(df.columns)}"
+            )
 
         self.features = torch.from_numpy(extract_features(df))
         # ``torch.tensor`` always copies, sidestepping pandas' non-writable
         # views (which torch.from_numpy warns about).
         self.target = torch.tensor(
-            df["residual_bp"].to_numpy(dtype=np.float32),
+            df[target_column].to_numpy(dtype=np.float32),
             dtype=torch.float32,
         )
+        self.target_column = target_column
         # Keep uid/run_id around for downstream stratified eval.
         self.uid = torch.tensor(
             df["uid"].to_numpy(dtype=np.int64),
